@@ -1,0 +1,165 @@
+{
+  "_comment": [
+    "Base models offered by the MiniMax-H3 Prompt Rewriter node.",
+    "",
+    "This file is yours to edit — add any Qwen3.6-27B build you like and it appears",
+    "in the node's model dropdown after a browser refresh. It is copied into the",
+    "ComfyUI user directory on first use, so updating the node pack never",
+    "overwrites your edits.",
+    "",
+    "Fields:",
+    "  name        label shown in the dropdown; keep it stable or saved workflows lose their choice",
+    "  repo        Hugging Face repository id, or an absolute path to a local folder/file",
+    "  format      'transformers' (a folder of safetensors) or 'gguf' (one file, run by llama.cpp)",
+    "  file        gguf only: which file inside the repository to fetch",
+    "  download_gb approximate download size, shown in the label",
+    "  vram        short note about what it needs to run, shown in the label",
+    "  note        optional warning appended to the label",
+    "",
+    "transformers builds are verified from their config.json (4 KB) before anything",
+    "is downloaded: wrong architecture, a missing runtime package, or a quantization",
+    "PEFT cannot attach a LoRA to are all reported up front.",
+    "",
+    "gguf builds need llama-cpp-python installed, and use the GGUF adapter below",
+    "rather than the PEFT one. They are the low-VRAM route: a Q4_K_M base is 15.7 GB",
+    "instead of 52 GB, and the IQ2/IQ3 quants go lower still at some quality cost."
+  ],
+  "adapters": {
+    "transformers": {
+      "repo": "lightx2v/MiniMax-H3-Prompt-Rewriter-LoRA",
+      "download_gb": 3.48
+    },
+    "gguf": {
+      "repo": "ivanfromm/MiniMax-H3-Prompt-Rewriter-LoRA-GGUF",
+      "file": "MiniMax-H3-Prompt-Rewriter-LoRA-F16.gguf",
+      "download_gb": 3.48
+    }
+  },
+  "models": [
+    {
+      "name": "Qwen3.6-27B (official, bf16)",
+      "repo": "Qwen/Qwen3.6-27B",
+      "format": "transformers",
+      "download_gb": 51.8,
+      "vram": "16 GB as nf4 / 28 GB as int8 / 54 GB as bf16"
+    },
+    {
+      "name": "Qwen3.6-27B bnb-4bit (samajlouis)",
+      "repo": "samajlouis/Qwen3.6-27B-bnb-nf4",
+      "format": "transformers",
+      "download_gb": 17.3,
+      "vram": "~16 GB, nothing extra to install",
+      "note": "third-party repack, not published by Qwen"
+    },
+    {
+      "name": "Qwen3.6-27B bnb-4bit (wyzxxywl)",
+      "repo": "wyzxxywl/Qwen3.6-27B-bnb-4bit",
+      "format": "transformers",
+      "download_gb": 16.8,
+      "vram": "~16 GB, nothing extra to install",
+      "note": "third-party repack, not published by Qwen"
+    },
+    {
+      "name": "Qwen3.6-27B FP8",
+      "repo": "Qwen/Qwen3.6-27B-FP8",
+      "format": "transformers",
+      "download_gb": 28.8,
+      "vram": "~29 GB",
+      "note": "advanced: needs the 'kernels' package plus a Triton kernel download, and leaves no room for the video model beside it"
+    },
+    {
+      "name": "Qwen3.6-27B GGUF Q8_0",
+      "repo": "unsloth/Qwen3.6-27B-GGUF",
+      "file": "Qwen3.6-27B-Q8_0.gguf",
+      "format": "gguf",
+      "download_gb": 26.6,
+      "vram": "~30 GB with the adapter",
+      "note": "needs ~30 GB of VRAM; lower gpu_layers if it will not fit"
+    },
+    {
+      "name": "Qwen3.6-27B GGUF Q6_K",
+      "repo": "unsloth/Qwen3.6-27B-GGUF",
+      "file": "Qwen3.6-27B-Q6_K.gguf",
+      "format": "gguf",
+      "download_gb": 21.0,
+      "vram": "~25 GB with the adapter"
+    },
+    {
+      "name": "Qwen3.6-27B GGUF Q5_K_M",
+      "repo": "unsloth/Qwen3.6-27B-GGUF",
+      "file": "Qwen3.6-27B-Q5_K_M.gguf",
+      "format": "gguf",
+      "download_gb": 18.2,
+      "vram": "~22 GB with the adapter"
+    },
+    {
+      "name": "Qwen3.6-27B GGUF Q4_K_M",
+      "repo": "unsloth/Qwen3.6-27B-GGUF",
+      "file": "Qwen3.6-27B-Q4_K_M.gguf",
+      "format": "gguf",
+      "download_gb": 15.7,
+      "vram": "~19 GB with the adapter, less if you offload fewer layers"
+    },
+    {
+      "name": "Qwen3.6-27B GGUF IQ4_XS",
+      "repo": "unsloth/Qwen3.6-27B-GGUF",
+      "file": "Qwen3.6-27B-IQ4_XS.gguf",
+      "format": "gguf",
+      "download_gb": 14.4,
+      "vram": "~18 GB with the adapter"
+    },
+    {
+      "name": "Qwen3.6-27B GGUF UD-Q3_K_XL",
+      "repo": "unsloth/Qwen3.6-27B-GGUF",
+      "file": "Qwen3.6-27B-UD-Q3_K_XL.gguf",
+      "format": "gguf",
+      "download_gb": 13.5,
+      "vram": "~17 GB with the adapter"
+    },
+    {
+      "name": "Qwen3.6-27B GGUF UD-IQ2_M",
+      "repo": "unsloth/Qwen3.6-27B-GGUF",
+      "file": "Qwen3.6-27B-UD-IQ2_M.gguf",
+      "format": "gguf",
+      "download_gb": 10.1,
+      "vram": "~13 GB with the adapter",
+      "note": "smallest usable quant, noticeably lower fidelity"
+    },
+    {
+      "name": "Qwen3.6-27B Uncensored (HauhauCS) GGUF Q8_K_P",
+      "repo": "HauhauCS/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive",
+      "file": "Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-Q8_K_P.gguf",
+      "format": "gguf",
+      "download_gb": 29.8,
+      "vram": "~33 GB with the adapter",
+      "note": "abliterated fine-tune, not the base the LoRA was trained on; needs ~33 GB of VRAM, so most cards will need lower gpu_layers"
+    },
+    {
+      "name": "Qwen3.6-27B Uncensored (HauhauCS) GGUF Q6_K_P",
+      "repo": "HauhauCS/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive",
+      "file": "Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-Q6_K_P.gguf",
+      "format": "gguf",
+      "download_gb": 21.6,
+      "vram": "~25 GB with the adapter",
+      "note": "abliterated fine-tune, not the base the LoRA was trained on"
+    },
+    {
+      "name": "Qwen3.6-27B Uncensored (HauhauCS) GGUF Q5_K_P",
+      "repo": "HauhauCS/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive",
+      "file": "Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-Q5_K_P.gguf",
+      "format": "gguf",
+      "download_gb": 19.4,
+      "vram": "~23 GB with the adapter",
+      "note": "abliterated fine-tune, not the base the LoRA was trained on"
+    },
+    {
+      "name": "Qwen3.6-27B Uncensored (HauhauCS) GGUF Q4_K_P",
+      "repo": "HauhauCS/Qwen3.6-27B-Uncensored-HauhauCS-Aggressive",
+      "file": "Qwen3.6-27B-Uncensored-HauhauCS-Aggressive-Q4_K_P.gguf",
+      "format": "gguf",
+      "download_gb": 16.3,
+      "vram": "~20 GB with the adapter",
+      "note": "abliterated fine-tune, not the base the LoRA was trained on"
+    }
+  ]
+}

@@ -216,3 +216,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# uv-manager
+uv.exe
+
+# Local development: junction helper and the ComfyUI path it remembers
+dev-junction.ps1
+dev-junction.bat
+comfyui-path.txt

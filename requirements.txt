@@ -1,0 +1,5 @@
+transformers>=4.57.1
+peft>=0.17
+accelerate>=1.10
+safetensors>=0.5
+bitsandbytes>=0.43; platform_system != "Darwin"
