@@ -1,6 +1,6 @@
 [project]
 name = "minimax-h3-prompt-rewriter"
-version = "0.6.0"
+version = "0.6.2"
 description = "ComfyUI nodes for the LightX2V MiniMax-H3 T2VA Prompt Rewriter LoRA: rewrite a short prompt into a structured MiniMax-H3 audio-video description, fully local."
 readme = "README.md"
 license = { file = "LICENSE" }

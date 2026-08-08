@@ -16,9 +16,13 @@ from .constants import (
     BASE_SKIP_SUFFIXES,
     DURATION_MAX,
     DURATION_MIN,
+    GGUF_RUNTIMES,
     OUTPUT_FIELDS,
     QUANTIZATIONS,
     RESOLUTIONS,
+    RUNTIME_AUTO,
+    RUNTIME_BINARY,
+    RUNTIME_WHEEL,
 )
 from .fields import split_fields
 from .paths import adapter_is_complete, base_model_is_complete, models_root, resolve_source
@@ -41,6 +45,7 @@ DEFAULT_OPTIONS = {
     "auto_download": True,
     "gpu_layers": -1,
     "n_ctx": 8192,
+    "gguf_runtime": RUNTIME_AUTO,
     "llama_backend": "auto",
 }
 
@@ -106,8 +111,6 @@ def model_choices() -> list[str]:
 def _resolve_model_choice(choice: str) -> Choice:
     found = _MODEL_MAP.get(choice)
     if found is None:
-        # The map is built when the frontend asks for object_info; rebuild in case
-        # this process never served that request, or the list changed since.
         found = _build_model_map().get(choice)
     if found is not None:
         return found
@@ -296,6 +299,19 @@ class MiniMaxH3RewriterOptions:
                         "tooltip": "GGUF only: context size llama.cpp allocates.",
                     },
                 ),
+                "gguf_runtime": (
+                    list(GGUF_RUNTIMES),
+                    {
+                        "default": RUNTIME_AUTO,
+                        "tooltip": (
+                            "GGUF only: what runs the model. 'auto' uses llama-cpp-python when "
+                            "it is importable and the official llama.cpp binaries otherwise. "
+                            "Force 'llama.cpp' if an installed wheel is broken; force "
+                            "'llama-cpp-python' to keep the model resident between runs, which "
+                            "the binaries cannot do."
+                        ),
+                    },
+                ),
                 "llama_backend": (
                     list(llamacpp.BACKENDS),
                     {
@@ -390,9 +406,6 @@ class MiniMaxH3PromptRewriter:
                 "seed": (
                     "INT",
                     {
-                        # Capped at 2**32-1 so "randomize" cannot produce a value
-                        # the backends have to fold, which would make the seed on
-                        # screen differ from the one that was used.
                         "default": 42,
                         "min": 0,
                         "max": 0xFFFFFFFF,
@@ -466,6 +479,13 @@ class MiniMaxH3PromptRewriter:
                 )
             adapter_path = None
             if settings["use_lora"]:
+                problem = discovery.gguf_problem(model_path)
+                if problem:
+                    raise RuntimeError(
+                        "This GGUF cannot run the prompt-rewriter LoRA.\n  - "
+                        + problem
+                        + "\nTurn 'use_lora' off to run it as a plain model anyway."
+                    )
                 adapter_path = _resolve_adapter(
                     FORMAT_GGUF, settings["adapter"], settings["auto_download"], progress
                 )
@@ -478,11 +498,18 @@ class MiniMaxH3PromptRewriter:
                 progress=progress,
                 **decoding,
             )
-            # llama-cpp-python when it is installed, official binaries when it is
-            # not. The wheel is faster to start and can hold the model between
-            # runs; the binaries need nothing installed and cannot be broken by
-            # a CPU without AVX-512 or a driver older than the wheel's PTX.
-            if gguf_engine.available():
+            runtime = settings.get("gguf_runtime", RUNTIME_AUTO)
+            if runtime == RUNTIME_AUTO:
+                runtime = RUNTIME_WHEEL if gguf_engine.available() else RUNTIME_BINARY
+
+            if runtime == RUNTIME_WHEEL:
+                if not gguf_engine.available():
+                    raise RuntimeError(
+                        f"gguf_runtime is set to '{RUNTIME_WHEEL}', but it is not importable "
+                        f"here. Install it, or set gguf_runtime to '{RUNTIME_AUTO}' or "
+                        f"'{RUNTIME_BINARY}' to run the official binaries instead.\n\n"
+                        + gguf_engine.INSTALL_HINT
+                    )
                 text = gguf_engine.rewrite(**common)
             else:
                 text = cli_engine.rewrite(

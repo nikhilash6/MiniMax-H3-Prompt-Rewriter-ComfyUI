@@ -20,6 +20,11 @@ DURATION_MAX = 15
 QUANTIZATIONS = ("nf4", "int8", "bfloat16", "float16")
 ATTN_IMPLEMENTATIONS = ("sdpa", "eager", "flash_attention_2")
 
+RUNTIME_AUTO = "auto"
+RUNTIME_WHEEL = "llama-cpp-python"
+RUNTIME_BINARY = "llama.cpp"
+GGUF_RUNTIMES = (RUNTIME_AUTO, RUNTIME_WHEEL, RUNTIME_BINARY)
+
 OUTPUT_FIELDS = (
     "integrated_multimodal_description",
     "overall_soundscape",

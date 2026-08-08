@@ -247,7 +247,20 @@ is honour `keep_model_loaded = True`. Two things come free with it: VRAM is
 returned by the operating system rather than by a deallocator, and a llama.cpp
 crash takes down a child process instead of ComfyUI and its queue.
 
-`llama_backend` in the options node chooses which official build to fetch:
+Two options in the options node control this, and they answer different
+questions. **`gguf_runtime`** picks *what runs the model*:
+
+| `gguf_runtime` | Meaning |
+|---|---|
+| `auto` | llama-cpp-python if it is importable, the binaries otherwise |
+| `llama-cpp-python` | force the wheel; fails with a clear message if it is absent, rather than quietly using something else |
+| `llama.cpp` | force the binaries, even when a wheel is installed — the way out when the installed wheel is broken |
+
+Only `llama-cpp-python` can honour `keep_model_loaded`; the binaries hand the
+model back to the operating system when the subprocess exits.
+
+**`llama_backend`** then picks *which official build to fetch*, and applies only
+when the binaries are in use:
 
 | `llama_backend` | Download | Notes |
 |---|---|---|
@@ -286,6 +299,16 @@ speed. With `Q4_K_M` fully offloaded to a high-end consumer NVIDIA card, CUDA
 generates at roughly **50 tok/s** with the adapter against 78 tok/s without it —
 that ~35% is llama.cpp doing the adapter's matmuls — and Vulkan at roughly half
 the CUDA figure.
+
+> **A smaller Qwen3.5 is not a substitute.** Qwen3.5-9B carries the same
+> `general.architecture = qwen35` in its header, so it looks like a match and
+> the model list will show it — but it has 32 blocks of width 4096 where the
+> adapter needs 64 of 5120. llama.cpp refuses to attach the LoRA
+> (`tensor 'blk.0.attn_gate.weight' has incorrect shape`) and the run fails.
+> The node checks those two header numbers first and says so before anything is
+> downloaded. If you see a 9B producing a plausible-looking rewrite, it is
+> running **without** the adapter: the format comes from the system prompt, not
+> from the LoRA.
 
 The GGUF route uses a **converted** adapter, not the PEFT one. Point the options
 node's `adapter` at a local `.gguf`, or set `adapters.gguf.repo` in the model

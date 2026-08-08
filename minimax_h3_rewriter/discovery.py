@@ -40,6 +40,16 @@ CONFIG_NAME = "config.json"
 GGUF_ARCH = "qwen35"
 GGUF_SCAN_DEPTH = 2
 
+#: Shape the adapter was trained against, as llama.cpp spells it in the header.
+#:
+#: The architecture string alone is not enough: Qwen3.5-9B is also ``qwen35``,
+#: and offering it would send somebody into llama.cpp's own refusal --
+#: "tensor 'blk.0.attn_gate.weight' has incorrect shape (hint: maybe wrong base
+#: model?)" -- after a 5 GB download. The 9B has 32 blocks of width 4096 where
+#: the adapter needs 64 of 5120, and those two numbers are in the 4 KB header.
+GGUF_BLOCK_COUNT = 64
+GGUF_EMBEDDING_LENGTH = 5120
+
 #: quant_method -> (pip package, import name, PEFT can attach LoRA)
 #:
 #: 'fp8' looks self-contained -- Transformers ships the integration and PEFT
@@ -336,50 +346,95 @@ def scan_local() -> list[tuple[str, str]]:
     return found
 
 
-_GGUF_INFO_CACHE: dict[tuple[str, int, int], tuple[str, str]] = {}
+_GGUF_HEADER_CACHE: dict[tuple[str, int, int], dict] = {}
 
 
-def gguf_info(path: str) -> tuple[str, str]:
-    """``(general.architecture, general.type)`` of a GGUF, from its header only.
+def gguf_header(path: str) -> dict:
+    """Architecture, type and shape of a GGUF, read from its header only.
 
     The type matters: a converted LoRA carries the *same* architecture as the
     model it was trained on, so architecture alone would offer a 3.5 GB adapter
-    as if it were a base model.
+    as if it were a base model. The shape matters for the same reason in the
+    other direction — see ``GGUF_BLOCK_COUNT``.
+
+    Cached per file identity, so a folder of large quants costs no more than a
+    stat each after the first pass.
     """
+    empty = {"arch": "", "kind": "", "blocks": None, "width": None}
     try:
         stat = os.stat(path)
     except OSError:
-        return "", ""
+        return empty
     key = (os.path.normcase(path), stat.st_size, int(stat.st_mtime))
-    cached = _GGUF_INFO_CACHE.get(key)
+    cached = _GGUF_HEADER_CACHE.get(key)
     if cached is not None:
         return cached
 
-    arch, kind = "", ""
+    header = dict(empty)
     try:
         from gguf import GGUFReader
 
         reader = GGUFReader(path, "r")
-        for field_name, target in (("general.architecture", "arch"), ("general.type", "kind")):
-            field = reader.fields.get(field_name)
-            if field is None:
-                continue
-            value = str(field.contents())
-            if target == "arch":
-                arch = value
-            else:
-                kind = value
-        if not kind:
-            kind = "adapter" if reader.fields.get("adapter.type") is not None else "model"
-    except Exception:
-        log.debug("[minimax_h3_rewriter.gguf_info] %s unreadable", path, exc_info=True)
 
-    _GGUF_INFO_CACHE[key] = (arch, kind)
-    return arch, kind
+        def value(name):
+            field = reader.fields.get(name)
+            return field.contents() if field is not None else None
+
+        header["arch"] = str(value("general.architecture") or "")
+        header["kind"] = str(value("general.type") or "")
+        if not header["kind"]:
+            header["kind"] = "adapter" if reader.fields.get("adapter.type") is not None else "model"
+        if header["arch"]:
+            blocks = value(f"{header['arch']}.block_count")
+            width = value(f"{header['arch']}.embedding_length")
+            header["blocks"] = int(blocks) if blocks is not None else None
+            header["width"] = int(width) if width is not None else None
+    except Exception:
+        log.debug("[minimax_h3_rewriter.gguf_header] %s unreadable", path, exc_info=True)
+
+    _GGUF_HEADER_CACHE[key] = header
+    return header
+
+
+def gguf_info(path: str) -> tuple[str, str]:
+    """``(general.architecture, general.type)``."""
+    header = gguf_header(path)
+    return header["arch"], header["kind"]
 
 
 def gguf_architecture(path: str) -> str:
-    return gguf_info(path)[0]
+    return gguf_header(path)["arch"]
+
+
+def gguf_problem(path: str) -> str:
+    """Why this GGUF cannot host the adapter, or "" when it can.
+
+    An adapter is bound to one shape. llama.cpp does catch the mismatch, but
+    only once the weights are in memory, and it reports it as a tensor shape
+    error that says nothing about which model to use instead.
+    """
+    header = gguf_header(path)
+    if not header["arch"]:
+        return f"'{os.path.basename(path)}' is not a readable GGUF file"
+    if header["arch"] != GGUF_ARCH:
+        return (
+            f"'{os.path.basename(path)}' is a '{header['arch']}' model; the adapter needs "
+            f"'{GGUF_ARCH}' (Qwen3.6-27B)"
+        )
+    if header["kind"] == "adapter":
+        return f"'{os.path.basename(path)}' is a LoRA adapter, not a base model"
+
+    blocks, width = header["blocks"], header["width"]
+    if blocks is None or width is None:
+        return ""
+    if blocks != GGUF_BLOCK_COUNT or width != GGUF_EMBEDDING_LENGTH:
+        return (
+            f"'{os.path.basename(path)}' has {blocks} blocks of width {width}; the adapter was "
+            f"trained on {GGUF_BLOCK_COUNT} of {GGUF_EMBEDDING_LENGTH} (Qwen3.6-27B). It shares "
+            f"the '{GGUF_ARCH}' architecture but not the shape, so llama.cpp cannot attach the "
+            f"LoRA to it — a smaller Qwen3.5 will run, but as a plain model with no rewriter."
+        )
+    return ""
 
 
 def _gguf_candidates(root: str, depth: int) -> list[str]:
