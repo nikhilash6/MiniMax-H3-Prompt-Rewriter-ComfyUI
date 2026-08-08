@@ -50,6 +50,14 @@ GGUF_SCAN_DEPTH = 2
 GGUF_BLOCK_COUNT = 64
 GGUF_EMBEDDING_LENGTH = 5120
 
+HEADER_KEYS = (
+    "general.architecture",
+    "general.type",
+    "adapter.type",
+    "clip.has_vision_encoder",
+    "clip.has_audio_encoder",
+)
+
 #: quant_method -> (pip package, import name, PEFT can attach LoRA)
 #:
 #: 'fp8' looks self-contained -- Transformers ships the integration and PEFT
@@ -378,18 +386,18 @@ def gguf_header(path: str) -> dict:
 
     header = dict(empty)
     try:
-        from gguf import GGUFReader
+        from . import gguf_meta
 
-        reader = GGUFReader(path, "r")
+        def also(found: dict) -> tuple[str, ...]:
+            arch = found.get("general.architecture")
+            return (f"{arch}.block_count", f"{arch}.embedding_length") if arch else ()
 
-        def value(name):
-            field = reader.fields.get(name)
-            return field.contents() if field is not None else None
+        value = gguf_meta.keys(path, HEADER_KEYS, probe=also, verify=True).get
 
         header["arch"] = str(value("general.architecture") or "")
         header["kind"] = str(value("general.type") or "")
         if not header["kind"]:
-            header["kind"] = "adapter" if reader.fields.get("adapter.type") is not None else "model"
+            header["kind"] = "adapter" if value("adapter.type") is not None else "model"
         header["vision"] = bool(value("clip.has_vision_encoder") or False)
         header["audio"] = bool(value("clip.has_audio_encoder") or False)
         if header["arch"]:

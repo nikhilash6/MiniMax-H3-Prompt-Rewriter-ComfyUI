@@ -132,9 +132,43 @@ rewriter uses the decoding parameters the adapter was published with.
 | `adapter` | the LightX2V repo | Repository id or local folder of the LoRA |
 | `use_lora` | on | Turn off for the plain Qwen3.6-27B baseline |
 | `auto_download` | on | Turn off to fail loudly instead of fetching 52 GB |
+| `device` | `auto` | Which GPU runs the language model — see below |
 
-The same options node feeds the writer nodes; `adapter` and `use_lora` simply do
-not apply there.
+The same options node feeds the writer nodes and the captioner; `adapter` and
+`use_lora` simply do not apply there.
+
+#### `device` — and why it changes `keep_model_loaded`
+
+Every node here has carried the same warning: turn `keep_model_loaded` off,
+because the card is needed for video generation the moment the rewrite finishes.
+That warning exists only because both models want the same device. **With two
+cards they need not.**
+
+Values are `auto`, `cpu`, and one `cuda:N` per GPU ComfyUI can see. One spelling,
+three backends:
+
+| | `auto` | `cuda:1` | `cpu` |
+|---|---|---|---|
+| llama.cpp binaries | unchanged | `--device CUDA1` | `--device none`, 0 layers |
+| llama-cpp-python | unchanged | `main_gpu=1`, split mode `NONE` | `n_gpu_layers=0` |
+| Transformers | `device_map="auto"` | `device_map={"": "cuda:1"}` | `{"": "cpu"}` |
+
+The important part is not the placement. **On another card, ComfyUI's own models
+are no longer evicted first.** Every backend here unloads them unconditionally
+today, which is right when both want the same VRAM and pure waste when they do
+not — it costs a full reload of the diffusion model after every rewrite. Pick a
+second card and the rewriter loads beside it, `keep_model_loaded` becomes worth
+switching on, and nothing has to move.
+
+Two details worth knowing. A device the machine does not have is **refused, not
+quietly demoted** — a workflow carried over from a two-card machine says so,
+instead of running on the wrong card and evicting a batch mid-flight. And the
+numbering is ComfyUI's own: started with `--cuda-device 1`, ComfyUI sees exactly
+one device and it is `cuda:0`, for the subprocesses too.
+
+The values are deliberately plain rather than `cuda:1 · RTX 4090`: a label with
+the card's name reads better and breaks every saved workflow the day the card is
+replaced. The tooltip names what is in each slot.
 
 ### MiniMax-H3 Prompt Writer (T2VA/I2VA/FL2VA/L2VA)
 
@@ -611,6 +645,14 @@ so nothing breaks when the ComfyUI frontend updates.
 - **A chat template that rejects a system role still works.** Gemma's calls
   `raise_exception` on one; the guide is then folded into the first user turn, as
   those models' own cards prescribe.
+- **Listing your GGUF models is nearly free.** Building the dropdown needs six
+  values from the first few kilobytes of each file, but `gguf.GGUFReader`
+  materialises the whole header the moment it opens one — including
+  `tokenizer.ggml.tokens`, a quarter of a million strings. Ten files in a model
+  folder cost 31 seconds, paid the first time ComfyUI answered `/object_info`.
+  The header is now walked directly and skipped past, which is the same six
+  values in **0.4 s**. A half-downloaded file is still refused, by checking its
+  tensor offsets against its size rather than by failing to map them.
 - **The captioner writes media to a temporary folder** — an IMAGE becomes PNGs, an
   AUDIO a 16-bit WAV written with the standard library, a VIDEO its own file — and
   removes the folder afterwards, including when the child process crashes.

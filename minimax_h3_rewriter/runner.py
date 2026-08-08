@@ -65,7 +65,21 @@ class ChildFailed(RuntimeError):
     """The subprocess stalled, crashed, or exited non-zero."""
 
 
-def free_comfy_vram() -> None:
+def free_comfy_vram(device: str = "auto") -> None:
+    """Evict ComfyUI's models, unless this run is going somewhere else entirely.
+
+    Making room is right when both models want the same card and actively
+    harmful when they do not: on a second GPU, unloading the diffusion model
+    costs a full reload after the rewrite and buys nothing.
+    """
+    from . import devices
+
+    if not devices.shares_comfy_device(device):
+        log.info(
+            "[minimax_h3_rewriter.runner.free_comfy_vram] running on %s, leaving ComfyUI's "
+            "models where they are", device,
+        )
+        return
     try:
         import comfy.model_management as mm
 

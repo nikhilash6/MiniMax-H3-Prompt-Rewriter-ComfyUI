@@ -14,6 +14,7 @@ import logging
 import os
 import threading
 
+from . import devices
 from .constants import normalize_seed
 from .progress import NodeProgress
 
@@ -31,14 +32,10 @@ def _torch():
     return torch
 
 
-def _free_comfy_vram() -> None:
-    try:
-        import comfy.model_management as mm
+def _free_comfy_vram(device: str = devices.AUTO) -> None:
+    from . import runner
 
-        mm.unload_all_models()
-        mm.soft_empty_cache(force=True)
-    except Exception:
-        log.debug("[minimax_h3_rewriter._free_comfy_vram] skipped", exc_info=True)
+    runner.free_comfy_vram(device)
 
 
 def _empty_cache() -> None:
@@ -173,17 +170,25 @@ def load(
     adapter_dir: str | None,
     quantization: str,
     attn_implementation: str,
+    device: str = devices.AUTO,
     progress: NodeProgress | None = None,
 ):
     """Return ``(tokenizer, model)``, reusing the cached pair when unchanged."""
-    key = (os.path.normcase(base_dir), os.path.normcase(adapter_dir or ""), quantization, attn_implementation)
+    device = devices.validate(device)
+    key = (
+        os.path.normcase(base_dir),
+        os.path.normcase(adapter_dir or ""),
+        quantization,
+        attn_implementation,
+        device,
+    )
 
     with _LOCK:
         if _STATE["key"] == key and _STATE["model"] is not None:
             return _STATE["tokenizer"], _STATE["model"]
 
         unload()
-        _free_comfy_vram()
+        _free_comfy_vram(device)
 
         from transformers import AutoTokenizer
 
@@ -211,7 +216,7 @@ def load(
 
         model_kwargs = {
             "dtype": dtype,
-            "device_map": "auto",
+            "device_map": devices.device_map(device),
             "attn_implementation": attn_implementation,
         }
         if remote_code:
@@ -404,6 +409,7 @@ def rewrite(
     quantization: str,
     attn_implementation: str,
     keep_loaded: bool,
+    device: str = devices.AUTO,
     progress: NodeProgress | None = None,
     **generation,
 ) -> str:
@@ -412,7 +418,9 @@ def rewrite(
     The model reference never escapes this frame, so ``unload`` can actually
     drop the last reference and free the device memory.
     """
-    tokenizer, model = load(base_dir, adapter_dir, quantization, attn_implementation, progress)
+    tokenizer, model = load(
+        base_dir, adapter_dir, quantization, attn_implementation, device, progress
+    )
     try:
         return generate(tokenizer, model, progress=progress, **generation)
     finally:

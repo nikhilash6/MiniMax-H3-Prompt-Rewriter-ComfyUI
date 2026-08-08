@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 import os
 
-from . import llamacpp, media, runner
+from . import devices, llamacpp, media, runner
 from .constants import normalize_seed
 from .progress import NodeProgress
 
@@ -62,12 +62,15 @@ def build_command(
     temperature: float = 0.7,
     top_p: float = 0.8,
     top_k: int = 20,
+    device: str = devices.AUTO,
 ) -> list[str]:
-    layers = ALL_LAYERS if int(gpu_layers) < 0 else int(gpu_layers)
+    layers = devices.layers_for(device, gpu_layers)
+    layers = ALL_LAYERS if layers < 0 else layers
     command = [
         binary,
         "--model", model_path,
         "--mmproj", mmproj_path,
+        *devices.llama_arguments(device),
         "--n-gpu-layers", str(layers),
         "--ctx-size", str(int(n_ctx)),
         "--predict", str(int(max_new_tokens)),
@@ -137,11 +140,13 @@ def describe(
     temperature: float = 0.7,
     top_p: float = 0.8,
     top_k: int = 20,
+    device: str = devices.AUTO,
     backend: str = "auto",
     auto_download: bool = True,
     progress: NodeProgress | None = None,
 ) -> str:
     """Fetch the runtime if needed, describe the attachments once, and return the text."""
+    device = devices.validate(device)
     if image is None and audio is None and video is None:
         raise ValueError(
             "nothing to describe: connect an image, an audio clip or a video, or type the "
@@ -154,14 +159,15 @@ def describe(
         attachments, notes = attachments_from(workspace, image, audio, video, max_frames)
         command = build_command(
             binary, model_path, mmproj_path, instruction, attachments,
-            gpu_layers, n_ctx, seed, greedy, max_new_tokens, temperature, top_p, top_k,
+            gpu_layers, n_ctx, seed, greedy, max_new_tokens, temperature, top_p, top_k, device,
         )
 
-        runner.free_comfy_vram()
+        runner.free_comfy_vram(device)
         if progress is not None:
+            where = "" if device == devices.AUTO else f" on {device}"
             progress.set_total(max(int(max_new_tokens), 1))
             progress.text(
-                f"Describing {' + '.join(notes)}\n{os.path.basename(model_path)}",
+                f"Describing {' + '.join(notes)}\n{os.path.basename(model_path)}{where}",
                 force=True,
             )
 

@@ -11,6 +11,7 @@ import re
 from . import (
     catalog,
     cli_engine,
+    devices,
     discovery,
     download,
     engine,
@@ -63,6 +64,7 @@ DEFAULT_OPTIONS = {
     "n_ctx": 8192,
     "gguf_runtime": RUNTIME_AUTO,
     "llama_backend": "auto",
+    "device": devices.AUTO,
 }
 
 BASE_SPEC = {
@@ -467,6 +469,10 @@ class MiniMaxH3RewriterOptions:
                         ),
                     },
                 ),
+                "device": (
+                    devices.choices(),
+                    {"default": devices.AUTO, "tooltip": devices.tooltip()},
+                ),
                 "llama_backend": (
                     list(llamacpp.BACKENDS),
                     {
@@ -573,7 +579,9 @@ class MiniMaxH3PromptRewriter:
                         "default": False,
                         "tooltip": (
                             "Keep the 27B model in VRAM after the rewrite. Leave off when the same "
-                            "GPU has to run MiniMax-H3 video generation afterwards."
+                            "GPU has to run MiniMax-H3 video generation afterwards — or give the "
+                            "rewriter a card of its own with 'device' in the options node, and then "
+                            "there is nothing to compete with."
                         ),
                     },
                 ),
@@ -648,6 +656,7 @@ class MiniMaxH3PromptRewriter:
                 gpu_layers=int(settings["gpu_layers"]),
                 n_ctx=int(settings["n_ctx"]),
                 keep_loaded=keep_model_loaded,
+                device=settings["device"],
                 progress=progress,
                 **decoding,
             )
@@ -684,6 +693,7 @@ class MiniMaxH3PromptRewriter:
                 quantization=quantization,
                 attn_implementation=settings["attn_implementation"],
                 keep_loaded=keep_model_loaded,
+                device=settings["device"],
                 progress=progress,
                 **decoding,
             )
@@ -761,6 +771,7 @@ def _guided_text(
         gpu_layers=int(settings["gpu_layers"]),
         n_ctx=n_ctx,
         keep_loaded=keep_model_loaded,
+        device=settings["device"],
         progress=progress,
         messages=messages,
         seed=int(seed),
@@ -889,7 +900,8 @@ class MiniMaxH3GuidedWriter:
                         "default": False,
                         "tooltip": (
                             "Keep the writer in VRAM after the rewrite. Leave off when the same "
-                            "GPU has to run MiniMax-H3 video generation afterwards."
+                            "GPU has to run MiniMax-H3 video generation afterwards — or send it to "
+                            "a second card with 'device' in the options node."
                         ),
                     },
                 ),
@@ -1384,6 +1396,7 @@ class MiniMaxH3ReferenceCaption:
                 temperature=float(settings["temperature"]),
                 top_p=float(settings["top_p"]),
                 top_k=int(settings["top_k"]),
+                device=settings["device"],
                 backend=settings["llama_backend"],
                 auto_download=settings["auto_download"],
                 progress=progress,

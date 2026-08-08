@@ -26,7 +26,7 @@ import logging
 import os
 import tempfile
 
-from . import chat_template, llamacpp, runner
+from . import chat_template, devices, llamacpp, runner
 from .constants import normalize_seed
 from .progress import NodeProgress
 
@@ -45,8 +45,11 @@ def available() -> bool:
     return llamacpp.available()
 
 
+TEMPLATE_KEYS = (chat_template.TEMPLATE_KEY, "chat_template")
+
+
 def gguf_metadata(model_path: str) -> dict:
-    """The GGUF key/value header, read straight from the file.
+    """The chat template out of a GGUF header, read straight from the file.
 
     Only the header is touched, and the answer is cached per file identity, so
     this costs a stat on every run after the first even for a 15.7 GB model.
@@ -61,21 +64,9 @@ def gguf_metadata(model_path: str) -> dict:
     if cached is not None:
         return cached
 
-    try:
-        from gguf import GGUFReader
-    except ImportError as error:  # pragma: no cover - gguf ships with ComfyUI
-        raise RuntimeError(
-            "Reading the GGUF chat template needs the 'gguf' package, which ComfyUI "
-            "normally provides."
-        ) from error
+    from . import gguf_meta
 
-    reader = GGUFReader(model_path, "r")
-    metadata = {}
-    for name, field in reader.fields.items():
-        try:
-            metadata[name] = field.contents()
-        except Exception:
-            continue
+    metadata = gguf_meta.keys(model_path, TEMPLATE_KEYS)
     _METADATA_CACHE[key] = metadata
     return metadata
 
@@ -98,12 +89,15 @@ def build_command(
     top_p: float,
     top_k: int,
     repetition_penalty: float,
+    device: str = devices.AUTO,
 ) -> list[str]:
-    layers = ALL_LAYERS if int(gpu_layers) < 0 else int(gpu_layers)
+    layers = devices.layers_for(device, gpu_layers)
+    layers = ALL_LAYERS if layers < 0 else layers
     command = [
         binary,
         "--model", model_path,
         "--file", prompt_file,
+        *devices.llama_arguments(device),
         "--n-gpu-layers", str(layers),
         "--ctx-size", str(int(n_ctx)),
         "--predict", str(int(max_new_tokens)),
@@ -141,8 +135,10 @@ def generate(
     top_p: float,
     top_k: int,
     repetition_penalty: float,
+    device: str = devices.AUTO,
     progress: NodeProgress | None = None,
 ) -> str:
+    device = devices.validate(device)
     rendered = render_prompt(model_path, messages)
 
     handle, prompt_file = tempfile.mkstemp(prefix="minimax_h3_", suffix=".txt")
@@ -151,15 +147,18 @@ def generate(
 
     command = build_command(
         binary, model_path, adapter_path, prompt_file, gpu_layers, n_ctx, seed,
-        greedy, max_new_tokens, temperature, top_p, top_k, repetition_penalty,
+        greedy, max_new_tokens, temperature, top_p, top_k, repetition_penalty, device,
     )
 
-    runner.free_comfy_vram()
+    runner.free_comfy_vram(device)
     if progress is not None:
         name = os.path.basename(model_path)
         note = f" + {os.path.basename(adapter_path)}" if adapter_path else " (no adapter)"
+        where = "" if device == devices.AUTO else f" on {device}"
         progress.set_total(max(int(max_new_tokens), 1))
-        progress.text(f"Loading {name}{note}\nllama.cpp binary, {gpu_layers} GPU layers", force=True)
+        progress.text(
+            f"Loading {name}{note}\nllama.cpp binary{where}, {gpu_layers} GPU layers", force=True
+        )
 
     def report(whole: str) -> None:
         if progress is None:

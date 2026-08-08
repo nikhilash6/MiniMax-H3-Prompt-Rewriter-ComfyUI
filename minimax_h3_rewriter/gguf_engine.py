@@ -18,7 +18,7 @@ import os
 import sys
 import threading
 
-from . import chat_template
+from . import chat_template, devices
 from .constants import install_command, normalize_seed
 from .progress import NodeProgress
 
@@ -93,14 +93,10 @@ def _llama_cpp():
     return llama_cpp
 
 
-def _free_comfy_vram() -> None:
-    try:
-        import comfy.model_management as mm
+def _free_comfy_vram(device: str = devices.AUTO) -> None:
+    from . import runner
 
-        mm.unload_all_models()
-        mm.soft_empty_cache(force=True)
-    except Exception:
-        log.debug("[minimax_h3_rewriter.gguf._free_comfy_vram] skipped", exc_info=True)
+    runner.free_comfy_vram(device)
 
 
 def _interrupted() -> bool:
@@ -117,14 +113,21 @@ def load(
     adapter_path: str | None,
     gpu_layers: int,
     n_ctx: int,
+    device: str = devices.AUTO,
     progress: NodeProgress | None = None,
 ):
-    """Return a cached ``Llama`` for this combination of files and placement."""
+    """Return a cached ``Llama`` for this combination of files and placement.
+
+    The device is part of the key: without it, switching cards would hand back
+    the instance still resident on the old one.
+    """
+    device = devices.validate(device)
     key = (
         os.path.normcase(model_path),
         os.path.normcase(adapter_path or ""),
         int(gpu_layers),
         int(n_ctx),
+        device,
     )
 
     with _LOCK:
@@ -132,7 +135,7 @@ def load(
             return _STATE["llama"]
 
         unload()
-        _free_comfy_vram()
+        _free_comfy_vram(device)
 
         llama_cpp = _llama_cpp()
 
@@ -140,14 +143,18 @@ def load(
             progress.set_total(1000)
             name = os.path.basename(model_path)
             adapter_note = f" + {os.path.basename(adapter_path)}" if adapter_path else " (no adapter)"
-            progress.ratio(0.05, f"Loading {name}{adapter_note}\nllama.cpp, {gpu_layers} GPU layers")
+            where = "" if device == devices.AUTO else f" on {device}"
+            progress.ratio(
+                0.05, f"Loading {name}{adapter_note}\nllama.cpp{where}, {gpu_layers} GPU layers"
+            )
 
         kwargs = {
             "model_path": model_path,
-            "n_gpu_layers": int(gpu_layers),
+            "n_gpu_layers": devices.layers_for(device, gpu_layers),
             "n_ctx": int(n_ctx),
             "verbose": False,
         }
+        kwargs.update(devices.llama_cpp_kwargs(device))
         if adapter_path:
             kwargs["lora_path"] = adapter_path
 
@@ -273,11 +280,12 @@ def rewrite(
     gpu_layers: int,
     n_ctx: int,
     keep_loaded: bool,
+    device: str = devices.AUTO,
     progress: NodeProgress | None = None,
     **generation,
 ) -> str:
     """Load (or reuse) the GGUF rewriter, generate once, release unless kept."""
-    llama = load(model_path, adapter_path, gpu_layers, n_ctx, progress)
+    llama = load(model_path, adapter_path, gpu_layers, n_ctx, device, progress)
     try:
         return generate(llama, progress=progress, **generation)
     finally:
