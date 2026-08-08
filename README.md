@@ -123,6 +123,8 @@ releases the VRAM again.
 Everything you rarely touch, kept off the main node. Leave it unconnected and the
 rewriter uses the decoding parameters the adapter was published with.
 
+![The Rewriter Options node, one output socket and fourteen widgets: max_new_tokens, temperature, top_p, top_k, repetition_penalty, attn_implementation, the adapter repository, use_lora, auto_download, gpu_layers, n_ctx, gguf_runtime, device and llama_backend](docs/node_options.png)
+
 | Input | Default | Purpose |
 |---|---|---|
 | `max_new_tokens` | 2048 | Generation cap |
@@ -177,6 +179,13 @@ The same three output fields, without the LoRA and without the 27B. MiniMax's ow
 goes into the system prompt and any instruction-following GGUF writes to it. A
 5.2 GB Qwen3.5-9B fills all three fields, with correct camera vocabulary, speaker
 IDs and `<d>[English] …</d>` dialogue, in about 20 seconds.
+
+![The T2VA writer node beside a text viewer: a four-line prompt on the left, and on the right the shot-by-shot description with its two numbered shots, the soundscape paragraph, and non_diegetic_music reading N/A](docs/node_t2va.png)
+
+*T2VA, 10 seconds at 16:9, on a local Qwen3.6-27B — 11.2 s. The prompt went in
+in Russian and the description came back in H3's English format, with the cut at
+00:03.000 that the prompt asked for and `non_diegetic_music: N/A` because it
+asked for no music.*
 
 The trade is worth stating plainly. The LoRA **is** the format: a 27B was trained
 until H3 output came out of it with a seven-line system prompt. Here the format is
@@ -235,6 +244,12 @@ Six sections instead of three, each its own output:
 | `overall_soundscape` | ambience and physical sound |
 | `non_diegetic_music` | audience-only score |
 
+![The Ref2VA writer node beside a text viewer showing all six sections: subject_definitions binding Subject 1 and Picture 1, the summary with its reference-generation task type, the retention analysis marking both labels fully_preserved, the shot-by-shot body, the soundscape and non_diegetic_music](docs/node_ref2va.png)
+
+*The same clip as above with one `Picture 1:` line added to `reference_assets` —
+17.4 s. The model picked the task type, bound `<Subject 1>` to the cat and
+`<Picture 1>` to the drawing's style, and wrote the retention analysis itself.*
+
 `reference_assets` is **required** and is refused when empty: full-reference mode
 describes how a target video reuses assets, so with no assets it is simply T2VA
 under another name. One per line —
@@ -266,6 +281,13 @@ label is numbered *within its own category*, which is the guide's own rule
 («`<Video N>` and `<Audio N>` are numbered independently»), so four assets come
 out as `Picture 1`, `Picture 2`, `Video 1`, `Audio 1` — not 1 through 4.
 
+![Two Reference Caption nodes chained: a Load Image feeds the first with role Picture, a Load Audio feeds the second with role Audio, reference_assets runs from the first node into the second node's previous input, and the viewer on the right shows both lines, Picture 1 and Audio 1](docs/node_ref_caption.png)
+
+*An image and an audio clip through Qwen2.5-Omni-7B — 4.4 s and 3.7 s. The
+second node received the first one's block on `previous` and appended to it, and
+the `Audio` role described the voice rather than transcribing it: "a male
+speaker with a calm and measured delivery, speaking in Russian".*
+
 `role` picks both the label and the question asked, and the questions differ on
 purpose:
 
@@ -287,8 +309,11 @@ Other inputs:
 - `description` — type it yourself and **no model runs at all**. The fastest way
   to add an asset you can describe in six words.
 - `instruction` — override the role's question entirely.
-- `max_frames` — how many frames to take from an IMAGE batch, spread evenly.
-  All of them would overflow both the context and the wall clock.
+- `max_frames` — how many frames to take from an IMAGE batch **or a VIDEO**,
+  spread evenly. All of them would overflow both the context and the wall clock:
+  two seconds at 25 fps is 56 images through the vision tower, and thirty seconds
+  is 750. This is what makes the cost of describing a clip independent of its
+  length.
 - `context_size` — `0` means the model's own, which is what its projector was
   sized against; one 1024×1024 frame is already twenty-odd media chunks. Lower it
   only to cut the KV cache, and know that too small a value fails the run instead
@@ -653,9 +678,17 @@ so nothing breaks when the ComfyUI frontend updates.
   The header is now walked directly and skipped past, which is the same six
   values in **0.4 s**. A half-downloaded file is still refused, by checking its
   tensor offsets against its size rather than by failing to map them.
-- **The captioner writes media to a temporary folder** — an IMAGE becomes PNGs, an
-  AUDIO a 16-bit WAV written with the standard library, a VIDEO its own file — and
+- **The captioner writes media to a temporary folder** — an IMAGE and a VIDEO
+  become PNGs, an AUDIO a 16-bit WAV written with the standard library — and
   removes the folder afterwards, including when the child process crashes.
+- **A VIDEO is sampled here, not passed to `llama-mtmd-cli --video`.** That flag
+  feeds the file to `ffprobe` through *stdin*, and when the MP4 carries its `moov`
+  atom at the front — which is what "faststart" means, and what ComfyUI, phones
+  and most of the web produce — ffprobe has what it needs after a few kilobytes
+  and exits without reading the rest. llama.cpp is still writing the remaining
+  megabytes into that pipe and blocks there for good: no output, no error, no end.
+  Same clip with `moov` moved to the end runs in six seconds. Frames are decoded
+  in-process instead, which also makes `max_frames` mean something for a VIDEO.
 - The rewrite may add details a short prompt never stated. Review it before
   generating when identity, dialogue, timing or composition must be exact.
 

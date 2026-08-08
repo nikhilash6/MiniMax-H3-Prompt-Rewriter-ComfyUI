@@ -43,7 +43,7 @@ ALL_LAYERS = 999
 
 DEFAULT_MAX_TOKENS = 256
 
-FLAG_FOR_KIND = {"image": "--image", "audio": "--audio", "video": "--video"}
+FLAG_FOR_KIND = {"image": "--image", "audio": "--audio"}
 
 CONTEXT_FROM_MODEL = 0
 
@@ -94,20 +94,38 @@ def build_command(
     return command
 
 
+def clip_note(count: int, seconds: float) -> str:
+    """Tell the model that these separate images are one clip, in order.
+
+    Without it the frames read as an unrelated set and the answer comes back as
+    "several photographs of ..." rather than a description of what happens.
+    """
+    span = f" spanning {seconds:.1f} seconds" if seconds > 0 else ""
+    return (
+        f"The {count} images are frames sampled evenly from a single video clip{span}, "
+        f"in chronological order. Describe the clip, not the individual frames."
+    )
+
+
 def attachments_from(
     workspace: media.Workspace,
     image=None,
     audio=None,
     video=None,
     max_frames: int = media.DEFAULT_MAX_FRAMES,
-) -> tuple[list[tuple[str, str]], list[str]]:
-    """Write the connected inputs to disk. Returns ``(attachments, notes)``."""
+) -> tuple[list[tuple[str, str]], list[str], str]:
+    """Write the connected inputs to disk. Returns ``(attachments, notes, note)``."""
     attachments: list[tuple[str, str]] = []
     notes: list[str] = []
+    note = ""
 
     if video is not None:
-        attachments.append(("video", media.video_file(video, workspace)))
-        notes.append("video")
+        paths, total, seconds = media.video_frames(video, workspace, max_frames)
+        attachments.extend(("image", path) for path in paths)
+        notes.append(f"{len(paths)} of {total} video frames" if total > len(paths)
+                     else f"video, {len(paths)} frames")
+        if len(paths) > 1:
+            note = clip_note(len(paths), seconds)
 
     if image is not None:
         paths = media.image_files(image, workspace, max_frames)
@@ -121,7 +139,7 @@ def attachments_from(
         attachments.append(("audio", media.audio_file(audio, workspace)))
         notes.append("audio")
 
-    return attachments, notes
+    return attachments, notes, note
 
 
 def describe(
@@ -156,7 +174,9 @@ def describe(
     binary = llamacpp.ensure_mtmd(backend, auto_download, progress)
 
     with media.Workspace() as workspace:
-        attachments, notes = attachments_from(workspace, image, audio, video, max_frames)
+        attachments, notes, note = attachments_from(workspace, image, audio, video, max_frames)
+        if note:
+            instruction = f"{note}\n\n{instruction}"
         command = build_command(
             binary, model_path, mmproj_path, instruction, attachments,
             gpu_layers, n_ctx, seed, greedy, max_new_tokens, temperature, top_p, top_k, device,

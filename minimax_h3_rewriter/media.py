@@ -1,9 +1,10 @@
 """Turning ComfyUI's in-memory media into files a subprocess can open.
 
-``llama-mtmd-cli`` takes paths, not tensors, so an IMAGE has to become a PNG, an
-AUDIO a WAV and a VIDEO a container on disk before any of it can be described.
-Everything lands in one temporary directory that is removed on the way out, so a
-workflow run leaves nothing behind even when the child crashes.
+``llama-mtmd-cli`` takes paths, not tensors, so an IMAGE has to become a PNG and
+an AUDIO a WAV before any of it can be described -- and a VIDEO becomes a
+handful of PNGs, for reasons :func:`video_frames` sets out. Everything lands in
+one temporary directory that is removed on the way out, so a workflow run leaves
+nothing behind even when the child crashes.
 
 Two deliberate choices:
 
@@ -91,15 +92,36 @@ def image_files(image, workspace: Workspace, max_frames: int = DEFAULT_MAX_FRAME
     return paths
 
 
+def _audio_parts(audio) -> tuple[object, object]:
+    """Pull ``waveform`` and ``sample_rate`` out of whatever an AUDIO input is.
+
+    ComfyUI's own AUDIO is a plain ``dict``, but nothing enforces that and the
+    common video loaders do not oblige: VideoHelperSuite hands over a
+    ``LazyAudioMap``, a ``Mapping`` that runs ffmpeg the first time a key is
+    read. ``isinstance(audio, dict)`` says no to it, which is how a perfectly
+    good audio track ended up rejected. Ask for the two keys instead of asking
+    what type the container is -- and reading them is what makes a lazy input
+    decode, so it has to happen here rather than in a membership test.
+    """
+    from collections.abc import Mapping
+
+    if isinstance(audio, Mapping):
+        return audio.get("waveform"), audio.get("sample_rate")
+    return getattr(audio, "waveform", None), getattr(audio, "sample_rate", None)
+
+
 def audio_file(audio, workspace: Workspace, name: str = "audio.wav") -> str:
-    """Write a ComfyUI AUDIO dict out as 16-bit PCM WAV. Returns the path."""
+    """Write a ComfyUI AUDIO input out as 16-bit PCM WAV. Returns the path."""
     numpy = _numpy()
 
-    if not isinstance(audio, dict) or "waveform" not in audio:
-        raise ValueError("expected a ComfyUI AUDIO input with a 'waveform' and a 'sample_rate'")
+    waveform, sample_rate = _audio_parts(audio)
+    if waveform is None:
+        raise ValueError(
+            "expected a ComfyUI AUDIO input with a 'waveform' and a 'sample_rate', got "
+            f"{type(audio).__name__}"
+        )
 
-    waveform = audio["waveform"]
-    rate = int(audio.get("sample_rate") or 44100)
+    rate = int(sample_rate or 44100)
 
     array = waveform.detach().cpu().numpy() if hasattr(waveform, "detach") else numpy.asarray(waveform)
     if array.ndim == 3:  # (batch, channels, samples) -- only the first clip is described
@@ -124,18 +146,19 @@ def audio_file(audio, workspace: Workspace, name: str = "audio.wav") -> str:
     return path
 
 
-def video_file(video, workspace: Workspace, name: str = "video" + VIDEO_SUFFIX) -> str:
-    """Materialise a ComfyUI VIDEO input as a file. Returns the path.
+SEEK_ABOVE_FRAMES = 300
 
-    A VIDEO loaded from disk can often hand over its own source path, which
-    saves a full re-encode of something that is already a file; anything else is
-    written out through the object's own ``save_to``.
-    """
+
+def _video_source(video, workspace: Workspace):
+    """Something PyAV can open: the original file if there is one, else a copy."""
     source = getattr(video, "_VideoFromFile__file", None)
     if isinstance(source, str) and os.path.isfile(source):
         return source
+    if hasattr(source, "read") and hasattr(source, "seek"):
+        source.seek(0)
+        return source
 
-    path = workspace.file(name)
+    path = workspace.file("video" + VIDEO_SUFFIX)
     save_to = getattr(video, "save_to", None)
     if callable(save_to):
         save_to(path)
@@ -144,6 +167,105 @@ def video_file(video, workspace: Workspace, name: str = "video" + VIDEO_SUFFIX) 
         raise RuntimeError("the VIDEO input produced an empty file")
 
     raise ValueError(
-        "this VIDEO input cannot be written to disk: it has no 'save_to'. Feed the frames "
-        "into the 'image' input instead."
+        "this VIDEO input cannot be read: it is neither a file on disk nor something with a "
+        "'save_to'. Feed the frames into the 'image' input instead."
     )
+
+
+def _frame_count(stream) -> int:
+    """How many frames the stream says it has, or an estimate, or 0."""
+    if stream.frames:
+        return int(stream.frames)
+    rate = float(stream.average_rate or 0)
+    if stream.duration and stream.time_base and rate:
+        return int(float(stream.duration * stream.time_base) * rate)
+    return 0
+
+
+def _in_order(container, stream, wanted: list[int]):
+    """Decode from the start, yielding the wanted frames and stopping after the last."""
+    remaining = list(wanted)
+    for position, frame in enumerate(container.decode(stream)):
+        if not remaining:
+            return
+        if position >= remaining[0]:
+            remaining.pop(0)
+            yield frame
+
+
+def _by_seeking(container, stream, wanted: list[int], total: int):
+    """Jump straight to each wanted frame -- eight seeks instead of a full decode.
+
+    A seek lands on the keyframe *before* the target, so the frames after it are
+    decoded until the target is reached. Taking the keyframe itself would be
+    cheaper and wrong: with a 250-frame GOP, eight samples spread over a
+    thousand frames would collapse onto four keyframes and describe the clip
+    twice over.
+    """
+    for index in wanted:
+        target = int(index / max(total, 1) * float(stream.duration))
+        container.seek(target, stream=stream)
+        for frame in container.decode(stream):
+            if frame.pts is not None and frame.pts < target:
+                continue
+            yield frame
+            break
+
+
+def _save(frames, workspace: Workspace) -> list[str]:
+    """Write frames out as PNGs one at a time, so no batch is ever held in memory."""
+    paths = []
+    for position, frame in enumerate(frames):
+        path = workspace.file(f"frame_{position:03d}.png")
+        frame.to_image().save(path, format="PNG")
+        paths.append(path)
+    return paths
+
+
+def video_frames(
+    video, workspace: Workspace, max_frames: int = DEFAULT_MAX_FRAMES
+) -> tuple[list[str], int, float]:
+    """Sample a VIDEO input into PNGs. Returns ``(paths, total frames, seconds)``.
+
+    The frames are decoded here rather than handed to ``llama-mtmd-cli --video``
+    for two reasons, one of them a hang and the other arithmetic:
+
+    - mtmd shells out to ``ffprobe`` and feeds it the file through *stdin*. When
+      the MP4 has its ``moov`` atom at the front -- which is what "faststart"
+      means, and what ComfyUI, phones and most of the web produce -- ffprobe has
+      what it needs after a few kilobytes and exits without reading the rest.
+      llama.cpp is still writing the remaining megabytes into that pipe, and
+      blocks there forever. Same clip with ``moov`` at the end: works. Verified
+      by moving the atom and nothing else.
+    - ``--video`` takes every frame. Two seconds at 25 fps is 56 images through
+      the vision tower; a thirty-second clip is 750. ``max_frames`` exists so
+      the cost of describing a clip does not depend on how long it is.
+    """
+    import av
+
+    source = _video_source(video, workspace)
+    paths: list[str] = []
+
+    with av.open(source) as container:
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+        total = _frame_count(stream)
+        seconds = float(container.duration / av.time_base) if container.duration else 0.0
+        wanted = frame_indices(total, max_frames) if total else list(range(max(max_frames, 1)))
+
+        if total > SEEK_ABOVE_FRAMES and stream.duration:
+            try:
+                paths = _save(_by_seeking(container, stream, wanted, total), workspace)
+            except Exception as error:
+                log.info(
+                    "[minimax_h3_rewriter.media.video_frames] seeking failed (%s), "
+                    "decoding in order instead", error,
+                )
+                container.seek(0)
+                paths = []
+        if not paths:
+            paths = _save(_in_order(container, stream, wanted), workspace)
+
+    if not paths:
+        raise RuntimeError("no frames could be decoded from the VIDEO input")
+    return paths, max(total, len(paths)), seconds
