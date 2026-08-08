@@ -22,87 +22,27 @@ multi-line template full of quotes needs no shell escaping on any platform.
 
 from __future__ import annotations
 
-import atexit
-import codecs
 import logging
 import os
-import queue
-import re
-import subprocess
-import sys
 import tempfile
-import threading
-import time
 
-from . import chat_template, llamacpp
+from . import chat_template, llamacpp, runner
 from .constants import normalize_seed
 from .progress import NodeProgress
 
 log = logging.getLogger(__name__)
 
 PREVIEW_TAIL = 280
-READ_CHUNK = 4096
-POLL_SECONDS = 0.25
-STDERR_TAIL = 40
 
-#: How long silence is allowed to last before the child is declared hung.
-#:
-#: Generous before the first byte, because loading 15-50 GB from a cold disk
-#: legitimately takes minutes; short afterwards, because a model that has begun
-#: emitting tokens and then stops for three minutes is not going to resume.
-#: Either way the node fails with a message instead of wedging the queue, which
-#: is what a subprocess that never exits does to ComfyUI.
-FIRST_BYTE_SECONDS = 900.0
-STALL_SECONDS = 180.0
-
-#: Every child ever started, so none can outlive the interpreter holding VRAM.
-_LIVE: set = set()
-
-
-def _kill_all() -> None:
-    for process in list(_LIVE):
-        if process.poll() is None:
-            try:
-                process.kill()
-            except Exception:
-                pass
-
-
-atexit.register(_kill_all)
-
-#: llama.cpp spells "all layers" as a large number, not -1.
 ALL_LAYERS = 999
 
-#: Rough characters per token, used only to advance the progress bar.
 CHARS_PER_TOKEN = 4.0
 
-_PERF = re.compile(r"eval time =.*?\(\s*([\d.]+)\s*ms per token,\s*([\d.]+)\s*tokens per second\)")
-
-_END_MARKER = re.compile(r"\s*\[end of text\]\s*$")
 _METADATA_CACHE: dict[tuple[str, int, int], dict] = {}
 
 
 def available() -> bool:
     return llamacpp.available()
-
-
-def _free_comfy_vram() -> None:
-    try:
-        import comfy.model_management as mm
-
-        mm.unload_all_models()
-        mm.soft_empty_cache(force=True)
-    except Exception:
-        log.debug("[minimax_h3_rewriter.cli._free_comfy_vram] skipped", exc_info=True)
-
-
-def _interrupted() -> bool:
-    try:
-        import comfy.model_management as mm
-
-        return bool(mm.processing_interrupted())
-    except Exception:
-        return False
 
 
 def gguf_metadata(model_path: str) -> dict:
@@ -187,48 +127,6 @@ def build_command(
     return command
 
 
-def _spawn(command: list[str], binary: str) -> subprocess.Popen:
-    environment = dict(os.environ)
-    directory = os.path.dirname(os.path.abspath(binary))
-    if sys.platform != "win32":
-        # The tar releases put the shared libraries beside the executable.
-        existing = environment.get("LD_LIBRARY_PATH", "")
-        environment["LD_LIBRARY_PATH"] = f"{directory}{os.pathsep}{existing}" if existing else directory
-
-    creation = 0
-    if sys.platform == "win32":
-        # Otherwise a console window flashes over the ComfyUI browser tab.
-        creation = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-
-    process = subprocess.Popen(
-        command,
-        # Closed, not inherited: a child that can never block waiting for a key
-        # is one failure mode fewer, and ComfyUI's own stdin is not ours to read.
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=directory,
-        env=environment,
-        creationflags=creation,
-        bufsize=0,
-    )
-    _LIVE.add(process)
-    return process
-
-
-def _pump(stream, sink: queue.Queue) -> None:
-    try:
-        while True:
-            chunk = stream.read(READ_CHUNK)
-            if not chunk:
-                break
-            sink.put(chunk)
-    except Exception:
-        log.debug("[minimax_h3_rewriter.cli._pump] reader stopped", exc_info=True)
-    finally:
-        sink.put(None)
-
-
 def generate(
     binary: str,
     model_path: str,
@@ -255,124 +153,35 @@ def generate(
         binary, model_path, adapter_path, prompt_file, gpu_layers, n_ctx, seed,
         greedy, max_new_tokens, temperature, top_p, top_k, repetition_penalty,
     )
-    log.info("[minimax_h3_rewriter.cli.generate] %s", " ".join(command))
 
-    _free_comfy_vram()
+    runner.free_comfy_vram()
     if progress is not None:
         name = os.path.basename(model_path)
         note = f" + {os.path.basename(adapter_path)}" if adapter_path else " (no adapter)"
         progress.set_total(max(int(max_new_tokens), 1))
         progress.text(f"Loading {name}{note}\nllama.cpp binary, {gpu_layers} GPU layers", force=True)
 
-    try:
-        process = _spawn(command, binary)
-    except OSError as error:
-        os.unlink(prompt_file)
-        raise RuntimeError(f"Could not start '{binary}': {error}") from error
-
-    output: queue.Queue = queue.Queue()
-    errors: queue.Queue = queue.Queue()
-    threading.Thread(target=_pump, args=(process.stdout, output), daemon=True).start()
-    threading.Thread(target=_pump, args=(process.stderr, errors), daemon=True).start()
-
-    # Token pieces arrive as raw bytes and a multi-byte character can straddle
-    # two reads, so decoding has to carry state rather than run per chunk.
-    decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-    pieces: list[str] = []
-    interrupted = False
-    finished = False
-    stalled = ""
-    last_output = time.monotonic()
+    def report(whole: str) -> None:
+        if progress is None:
+            return
+        progress.update(
+            min(len(whole) / CHARS_PER_TOKEN, float(max_new_tokens)),
+            f"Generating · {len(whole)} chars\n{whole[-PREVIEW_TAIL:]}",
+        )
 
     try:
-        while not finished:
-            if _interrupted():
-                interrupted = True
-                break
-            try:
-                chunk = output.get(timeout=POLL_SECONDS)
-            except queue.Empty:
-                limit = STALL_SECONDS if pieces else FIRST_BYTE_SECONDS
-                waited = time.monotonic() - last_output
-                if waited > limit:
-                    stalled = (
-                        f"produced nothing for {waited:.0f} s"
-                        if not pieces
-                        else f"stopped mid-generation for {waited:.0f} s"
-                    )
-                    break
-                continue
-            if chunk is None:
-                finished = True
-                break
-            last_output = time.monotonic()
-            text = decoder.decode(chunk)
-            if not text:
-                continue
-            pieces.append(text)
-            if progress is not None:
-                whole = "".join(pieces)
-                # llama-completion streams text, not token boundaries, so the bar
-                # is driven by an estimate. Four characters per token is close
-                # enough for English prose and never overshoots the cap, and the
-                # run almost always ends at EOS well before it anyway.
-                progress.update(
-                    min(len(whole) / CHARS_PER_TOKEN, float(max_new_tokens)),
-                    f"Generating · {len(whole)} chars\n{whole[-PREVIEW_TAIL:]}",
-                )
-        pieces.append(decoder.decode(b"", final=True))
+        text, stderr_text = runner.run(command, binary, report)
+    except runner.ChildFailed as error:
+        raise RuntimeError(str(error)) from error
     finally:
-        if interrupted or stalled or process.poll() is None:
-            process.kill()
-        process.wait()
-        _LIVE.discard(process)
         try:
             os.unlink(prompt_file)
         except OSError:
             log.debug("[minimax_h3_rewriter.cli.generate] could not remove %s", prompt_file)
 
-    stderr_text = _drain(errors)
-
-    if interrupted:
-        import comfy.model_management as mm
-
-        raise mm.InterruptProcessingException()
-
-    if stalled:
-        tail = "\n".join(stderr_text.splitlines()[-STDERR_TAIL:])
-        raise RuntimeError(
-            f"{os.path.basename(binary)} {stalled} and was stopped, so it could not wedge "
-            f"the queue. Last output from it:\n{tail}"
-        )
-
-    if process.returncode != 0:
-        tail = "\n".join(stderr_text.splitlines()[-STDERR_TAIL:])
-        raise RuntimeError(
-            f"llama-cli exited with code {process.returncode}.\n{tail}"
-        )
-
-    text = _END_MARKER.sub("", "".join(pieces).strip()).strip()
     if progress is not None:
-        progress.finish(f"Done · {len(text)} chars{_speed(stderr_text)}")
+        progress.finish(f"Done · {len(text)} chars{runner.speed(stderr_text)}")
     return text
-
-
-def _drain(sink: queue.Queue) -> str:
-    chunks = []
-    while True:
-        try:
-            chunk = sink.get_nowait()
-        except queue.Empty:
-            break
-        if chunk is None:
-            continue
-        chunks.append(chunk)
-    return b"".join(chunks).decode("utf-8", errors="replace")
-
-
-def _speed(stderr_text: str) -> str:
-    match = _PERF.search(stderr_text)
-    return f" · {match.group(2)} tok/s" if match else ""
 
 
 def unload() -> None:

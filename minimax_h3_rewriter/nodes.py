@@ -6,6 +6,8 @@ import logging
 import os
 from dataclasses import dataclass
 
+import re
+
 from . import (
     catalog,
     cli_engine,
@@ -16,6 +18,8 @@ from . import (
     guide_prompt,
     guides,
     llamacpp,
+    media,
+    mtmd_engine,
 )
 from .catalog import FORMAT_GGUF, FORMAT_TRANSFORMERS
 from .constants import (
@@ -184,6 +188,65 @@ def _resolve_writer_choice(choice: str) -> Choice:
     )
 
 
+@dataclass
+class CaptionerChoice:
+    """A captioner is two files that have to come from the same conversion."""
+
+    reference: str
+    file: str = ""
+    mmproj: str = ""
+    local: bool = False
+
+
+_CAPTIONER_MAP: dict[str, CaptionerChoice] = {}
+
+
+def _build_captioner_map() -> dict[str, CaptionerChoice]:
+    mapping: dict[str, CaptionerChoice] = {}
+    try:
+        for entry in catalog.captioners():
+            if not entry.mmproj:
+                log.warning(
+                    "[minimax_h3_rewriter._build_captioner_map] '%s' has no 'mmproj', skipping",
+                    entry.name,
+                )
+                continue
+            mapping[entry.label] = CaptionerChoice(
+                reference=entry.repo, file=entry.file, mmproj=entry.mmproj
+            )
+    except Exception:
+        log.warning("[minimax_h3_rewriter._build_captioner_map] catalog unreadable", exc_info=True)
+    try:
+        for label, model_path, mmproj_path in discovery.scan_captioner_gguf():
+            mapping[f"{LOCAL_PREFIX}{label}"] = CaptionerChoice(
+                reference=model_path, mmproj=mmproj_path, local=True
+            )
+    except Exception:
+        log.warning("[minimax_h3_rewriter._build_captioner_map] gguf scan failed", exc_info=True)
+
+    _CAPTIONER_MAP.clear()
+    _CAPTIONER_MAP.update(mapping)
+    return mapping
+
+
+def captioner_choices() -> list[str]:
+    choices = list(_build_captioner_map())
+    return choices or ["(no multimodal model found — see the model list)"]
+
+
+def _resolve_captioner_choice(choice: str) -> CaptionerChoice:
+    found = _CAPTIONER_MAP.get(choice)
+    if found is None:
+        found = _build_captioner_map().get(choice)
+    if found is not None:
+        return found
+    raise RuntimeError(
+        f"'{choice}' is not in the captioner list any more. Pick another entry, put a '.gguf' "
+        f"and its 'mmproj' together in one folder under ComfyUI's models/LLM, or add it under "
+        f"\"captioners\" in {catalog.user_file()}."
+    )
+
+
 def _verify_base_model(reference: str, progress: NodeProgress) -> None:
     """Refuse a wrong or unloadable base model before any weights move."""
     if os.path.isdir(reference):
@@ -262,6 +325,38 @@ def _ensure_file(repo_id: str, filename: str, label: str, auto_download: bool, p
     if not os.path.isfile(destination):
         raise RuntimeError(f"{label}: '{filename}' was not present after downloading from '{repo_id}'.")
     return destination
+
+
+def _ensure_pair(
+    repo_id: str, file: str, mmproj: str, label: str, auto_download: bool, progress: NodeProgress
+) -> tuple[str, str]:
+    """Return local paths to a model and its projector, fetching both if allowed.
+
+    They go into a folder of their own rather than into the flat models/LLM, so
+    the pair stays obvious to the local scan: one projector beside one model
+    needs no name matching at all.
+    """
+    directory = os.path.join(models_root(), repo_id.rstrip("/").split("/")[-1])
+    targets = tuple(os.path.join(directory, name) for name in (file, mmproj))
+
+    def complete() -> bool:
+        return all(os.path.isfile(path) and os.path.getsize(path) > 0 for path in targets)
+
+    if complete():
+        return targets
+    if not auto_download:
+        raise RuntimeError(
+            f"{label} is missing from '{directory}' and auto_download is off. Enable it, or "
+            f"fetch '{file}' and '{mmproj}' from '{repo_id}' into that folder."
+        )
+
+    _fetch(repo_id, directory, (file, mmproj), (), progress)
+    if not complete():
+        raise RuntimeError(
+            f"{label}: '{file}' and '{mmproj}' were not both present after downloading from "
+            f"'{repo_id}'."
+        )
+    return targets
 
 
 def _resolve_adapter(fmt: str, setting: str, auto_download: bool, progress: NodeProgress) -> str:
@@ -1055,12 +1150,259 @@ class MiniMaxH3GuidePrompt:
         return (system, user)
 
 
+CAPTION_ROLES = ("Subject", "Picture", "Video", "Audio")
+
+CAPTION_INSTRUCTIONS = {
+    "Subject": (
+        "Describe the main subject so it can be recognised again in another shot: who or what "
+        "it is, age and build if it is a person, hair, clothing and their colours, and any "
+        "distinguishing object it carries. State only what is visible. No interpretation, no "
+        "mood, no story."
+    ),
+    "Picture": (
+        "Describe this frame as a shot: overall visual style, shot size and camera angle, where "
+        "the subject sits in the frame, the environment and key props, the lighting and colour. "
+        "State only what is visible."
+    ),
+    "Video": (
+        "Describe what happens in this clip: the subjects and how they look, the actions in "
+        "order, how the camera moves, and any cuts and their pacing. State only what is visible."
+    ),
+    "Audio": (
+        "Describe the SOUND, not the words. Cover: the speaker's voice timbre, apparent age and "
+        "gender, delivery and speaking rate, any accent; the music, its instrumentation, tempo "
+        "and dynamics; and the background ambience and physical sound effects. Do not transcribe "
+        "or summarise what is said."
+    ),
+}
+
+CAPTION_LENGTHS = {
+    "brief": "Answer in one sentence.",
+    "standard": "Answer in two or three sentences.",
+    "detailed": "Answer in four to six sentences, covering every listed aspect.",
+}
+
+_ASSET_LINE = re.compile(r"^[ \t]*(Subject|Picture|Video|Audio)[ \t]+(\d+)[ \t]*:", re.IGNORECASE | re.MULTILINE)
+
+
+def next_index(previous: str, role: str) -> int:
+    """The next free number for this role, counted within its own category.
+
+    Which is the guide's own rule: "``<Video N>`` and ``<Audio N>`` are numbered
+    independently. Each index indicates only the label's order within its own
+    category." So a chain of four assets can be Picture 1, Picture 2, Video 1,
+    Audio 1 -- not 1 through 4.
+    """
+    highest = 0
+    for match in _ASSET_LINE.finditer(previous or ""):
+        if match.group(1).lower() == role.lower():
+            highest = max(highest, int(match.group(2)))
+    return highest + 1
+
+
+class MiniMaxH3ReferenceCaption:
+    """Describe one reference asset, and add it to a Ref2VA reference block."""
+
+    DESCRIPTION = (
+        "Describes an image, an audio clip or a video with a small multimodal model, and turns "
+        "the result into one labelled line of 'reference_assets' for the Ref2VA writer. Chain "
+        "several by wiring reference_assets into the next node's 'previous'; each label is "
+        "numbered within its own category, as the guide requires. Runs through the same "
+        "llama.cpp binaries as the rest of the pack, so there is nothing to install."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "role": (
+                    list(CAPTION_ROLES),
+                    {
+                        "default": "Picture",
+                        "tooltip": (
+                            "Subject: a person, object or place to reuse. Picture: this frame is "
+                            "a concrete first/last/key frame. Video: a clip whose structure or "
+                            "content is reused. Audio: a sound or voice reference. The role "
+                            "picks both the label and what the model is asked for."
+                        ),
+                    },
+                ),
+                "model": (
+                    captioner_choices(),
+                    {
+                        "tooltip": (
+                            "A multimodal GGUF and its projector. Entries prefixed 'on disk:' "
+                            "are pairs already in your ComfyUI model folders. Not every "
+                            "multimodal GGUF works: llama.cpp's mtmd has to understand the "
+                            "projector, and some current models abort while loading it."
+                        ),
+                    },
+                ),
+                "length": (
+                    list(CAPTION_LENGTHS),
+                    {"default": "standard", "tooltip": "How much the model is asked to write."},
+                ),
+                "seed": (
+                    "INT",
+                    {"default": 42, "min": 0, "max": 0xFFFFFFFF, "control_after_generate": True},
+                ),
+            },
+            "optional": {
+                "image": ("IMAGE", {"tooltip": "A frame, or a batch of frames from a clip."}),
+                "audio": ("AUDIO",),
+                "video": ("VIDEO",),
+                "previous": (
+                    "STRING",
+                    {
+                        "forceInput": True,
+                        "tooltip": "reference_assets from the previous caption node in the chain.",
+                    },
+                ),
+                "description": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "tooltip": (
+                            "Type the description yourself and no model is run at all — the "
+                            "fastest way to add an asset you can describe in a few words."
+                        ),
+                    },
+                ),
+                "instruction": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "tooltip": "Override what the model is asked. Empty uses the role's own question.",
+                    },
+                ),
+                "max_frames": (
+                    "INT",
+                    {
+                        "default": media.DEFAULT_MAX_FRAMES,
+                        "min": 1,
+                        "max": 64,
+                        "tooltip": (
+                            "How many frames to take from an IMAGE batch, spread evenly. All of "
+                            "them would overflow the context and the wall clock."
+                        ),
+                    },
+                ),
+                "context_size": (
+                    "INT",
+                    {
+                        "default": mtmd_engine.CONTEXT_FROM_MODEL,
+                        "min": 0,
+                        "max": 131072,
+                        "step": 1024,
+                        "tooltip": (
+                            "0 uses the model's own context, which is what its projector was "
+                            "sized against — one large frame is already twenty-odd media chunks. "
+                            "Set a number only to cut the KV cache on a small card; too small a "
+                            "value fails the run outright rather than truncating."
+                        ),
+                    },
+                ),
+                "options": (OPTIONS_TYPE,),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("reference_assets", "caption")
+    FUNCTION = "describe"
+    CATEGORY = CATEGORY
+
+    def describe(
+        self,
+        role,
+        model,
+        length,
+        seed,
+        image=None,
+        audio=None,
+        video=None,
+        previous="",
+        description="",
+        instruction="",
+        max_frames=media.DEFAULT_MAX_FRAMES,
+        context_size=mtmd_engine.CONTEXT_FROM_MODEL,
+        options=None,
+        unique_id=None,
+    ):
+        settings = dict(DEFAULT_OPTIONS)
+        if options:
+            settings.update(options)
+        progress = NodeProgress(unique_id)
+
+        caption = (description or "").strip()
+        if not caption:
+            if image is None and audio is None and video is None:
+                raise ValueError(
+                    f"{role}: nothing to describe. Connect an image, an audio clip or a video, "
+                    f"or type the description into 'description'."
+                )
+            choice = _resolve_captioner_choice(model)
+            if choice.local:
+                model_path, mmproj_path = choice.reference, choice.mmproj
+            else:
+                model_path, mmproj_path = _ensure_pair(
+                    choice.reference, choice.file, choice.mmproj, "Captioner",
+                    settings["auto_download"], progress,
+                )
+
+            header = discovery.gguf_header(mmproj_path)
+            if audio is not None and not header["audio"]:
+                raise RuntimeError(
+                    f"'{os.path.basename(mmproj_path)}' was built without an audio encoder, so "
+                    f"this model cannot hear the clip. Pick a captioner whose label lists "
+                    f"'audio'."
+                )
+            if (image is not None or video is not None) and not header["vision"]:
+                raise RuntimeError(
+                    f"'{os.path.basename(mmproj_path)}' was built without a vision encoder, so "
+                    f"this model cannot see. Pick a captioner whose label lists 'vision'."
+                )
+
+            asked = (instruction or "").strip() or CAPTION_INSTRUCTIONS[role]
+            asked = f"{asked} {CAPTION_LENGTHS[length]}"
+
+            caption = mtmd_engine.describe(
+                model_path=model_path,
+                mmproj_path=mmproj_path,
+                instruction=asked,
+                image=image,
+                audio=audio,
+                video=video,
+                max_frames=int(max_frames),
+                gpu_layers=int(settings["gpu_layers"]),
+                n_ctx=int(context_size),
+                seed=int(seed),
+                greedy=True,
+                max_new_tokens=min(int(settings["max_new_tokens"]), 1024),
+                temperature=float(settings["temperature"]),
+                top_p=float(settings["top_p"]),
+                top_k=int(settings["top_k"]),
+                backend=settings["llama_backend"],
+                auto_download=settings["auto_download"],
+                progress=progress,
+            )
+
+        caption = " ".join(caption.split())
+        line = f"{role} {next_index(previous, role)}: {caption}"
+        block = f"{(previous or '').rstrip()}\n{line}".strip()
+        progress.finish(line)
+        return (block, caption)
+
+
 NODE_CLASS_MAPPINGS = {
     "MiniMaxH3PromptRewriter": MiniMaxH3PromptRewriter,
     "MiniMaxH3RewriterOptions": MiniMaxH3RewriterOptions,
     "MiniMaxH3GuidedWriter": MiniMaxH3GuidedWriter,
     "MiniMaxH3GuidedWriterRef": MiniMaxH3GuidedWriterRef,
     "MiniMaxH3GuidePrompt": MiniMaxH3GuidePrompt,
+    "MiniMaxH3ReferenceCaption": MiniMaxH3ReferenceCaption,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1069,4 +1411,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "MiniMaxH3GuidedWriter": "MiniMax-H3 Prompt Writer (T2VA/I2VA/FL2VA/L2VA)",
     "MiniMaxH3GuidedWriterRef": "MiniMax-H3 Prompt Writer (Ref2VA)",
     "MiniMaxH3GuidePrompt": "MiniMax-H3 Guide Prompt (any LLM)",
+    "MiniMaxH3ReferenceCaption": "MiniMax-H3 Reference Caption",
 }

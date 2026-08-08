@@ -268,12 +268,18 @@ def _comfy_roots(names: tuple[str, ...] = SCAN_FOLDERS) -> list[str]:
     roots = []
     for name in names:
         try:
-            candidates = folder_paths.get_folder_paths(name)
+            candidates = list(folder_paths.get_folder_paths(name))
         except KeyError:
-            continue
+            candidates = []
+        try:
+            candidates.append(os.path.join(folder_paths.models_dir, name))
+        except Exception:
+            log.debug("[minimax_h3_rewriter._comfy_roots] no models_dir", exc_info=True)
         # A registered folder need not exist: extra_model_paths.yaml maps them in
         # from anywhere and some entries are simply wrong.
-        roots.extend(path for path in candidates if os.path.isdir(path))
+        for path in candidates:
+            if os.path.isdir(path) and path not in roots:
+                roots.append(path)
     return roots
 
 
@@ -360,7 +366,7 @@ def gguf_header(path: str) -> dict:
     Cached per file identity, so a folder of large quants costs no more than a
     stat each after the first pass.
     """
-    empty = {"arch": "", "kind": "", "blocks": None, "width": None}
+    empty = {"arch": "", "kind": "", "blocks": None, "width": None, "vision": False, "audio": False}
     try:
         stat = os.stat(path)
     except OSError:
@@ -384,6 +390,8 @@ def gguf_header(path: str) -> dict:
         header["kind"] = str(value("general.type") or "")
         if not header["kind"]:
             header["kind"] = "adapter" if reader.fields.get("adapter.type") is not None else "model"
+        header["vision"] = bool(value("clip.has_vision_encoder") or False)
+        header["audio"] = bool(value("clip.has_audio_encoder") or False)
         if header["arch"]:
             blocks = value(f"{header['arch']}.block_count")
             width = value(f"{header['arch']}.embedding_length")
@@ -506,3 +514,87 @@ def scan_local_gguf_adapters() -> list[tuple[str, str]]:
 def scan_writer_gguf() -> list[tuple[str, str]]:
     """Return ``(label, path)`` for every local GGUF base model, any architecture."""
     return _scan_gguf("model", arch=None)
+
+
+def _pair_mmproj(model: str, projectors: list[str]) -> str:
+    """Pick the projector belonging to one model within the same folder.
+
+    One projector in the folder is unambiguous and by far the common case. With
+    several, the names are compared: ``mmproj-Qwen2.5-Omni-3B-Q8_0.gguf`` shares
+    a stem with ``Qwen2.5-Omni-3B-Q4_K_M.gguf`` and not with anything else.
+    Pairing the wrong two produces gibberish rather than an error, so an
+    ambiguous folder yields nothing instead of a guess.
+    """
+    if len(projectors) == 1:
+        return projectors[0]
+
+    def stem_of(path: str, drop_mmproj: bool = False) -> str:
+        name = os.path.splitext(os.path.basename(path))[0].lower()
+        if drop_mmproj:
+            name = name.replace("mmproj", "")
+        return name.strip("-_. ")
+
+    stem = stem_of(model)
+    best, best_score = "", 0
+    for projector in projectors:
+        other = stem_of(projector, drop_mmproj=True)
+        score = len(os.path.commonprefix([stem, other]))
+        if other and other in stem:
+            score = max(score, len(other))
+        if stem and stem in other:
+            score = max(score, len(stem))
+        if score > best_score:
+            best, best_score = projector, score
+    return best if best_score >= 6 else ""
+
+
+def scan_captioner_gguf() -> list[tuple[str, str, str]]:
+    """Return ``(label, model path, mmproj path)`` for local multimodal pairs.
+
+    A captioner is two files, and they have to come from the same conversion.
+    Only folders that hold both are offered, so the node never starts a run that
+    is missing half of itself.
+    """
+    found: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    by_directory: dict[str, tuple[list[str], list[str]]] = {}
+
+    for root in _comfy_roots(GGUF_FOLDERS):
+        for path in _gguf_candidates(root, GGUF_SCAN_DEPTH):
+            key = os.path.normcase(os.path.abspath(path))
+            if key in seen:
+                continue
+            seen.add(key)
+            header = gguf_header(path)
+            if not header["arch"]:
+                continue
+            directory = os.path.dirname(key)
+            models, projectors = by_directory.setdefault(directory, ([], []))
+            if header["kind"] == "mmproj":
+                projectors.append(path)
+            elif header["kind"] == "model":
+                models.append(path)
+
+    for _directory, (models, projectors) in sorted(by_directory.items()):
+        if not projectors:
+            continue
+        for model in sorted(models):
+            projector = _pair_mmproj(model, projectors)
+            if not projector:
+                log.info(
+                    "[minimax_h3_rewriter.scan_captioner_gguf] no obvious projector for %s among %s",
+                    model, [os.path.basename(p) for p in projectors],
+                )
+                continue
+            header = gguf_header(projector)
+            modalities = ", ".join(
+                name for name, present in (("vision", header["vision"]), ("audio", header["audio"])) if present
+            ) or "unknown"
+            try:
+                size = (os.path.getsize(model) + os.path.getsize(projector)) / 1024 ** 3
+            except OSError:
+                size = 0.0
+            label = f"{os.path.basename(model)} [+mmproj, {modalities}, {size:.1f} GB]"
+            found.append((label, model, projector))
+
+    return found

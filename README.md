@@ -36,6 +36,10 @@ There are two ways to get that output, and the pack ships both:
 | Tasks | T2VA | T2VA, I2VA, FL2VA, L2VA, Ref2VA |
 | Quality | the reference | close, and it runs on hardware the LoRA cannot touch |
 
+Both read text. A third node, [Reference Caption](#minimax-h3-reference-caption),
+turns an image, an audio clip or a video into the text they need — 3 to 5 seconds
+per asset on a 3.4 GB model.
+
 If your card has 8 GB, skip to [the writer nodes](#minimax-h3-prompt-writer-t2vai2vafl2val2va).
 
 ## What you need before installing
@@ -156,9 +160,9 @@ Beyond the rewriter's inputs:
   the duration already substituted to two decimals; only the final shot number is
   left to the model.
 - `reference_material` — **this node reads text, not pixels.** For I2VA, FL2VA and
-  L2VA, describe what the reference frames show, by hand or from a captioner node
-  upstream. Without it the model invents a first frame that has nothing to do with
-  your image.
+  L2VA, describe what the reference frames show, by hand or from the
+  [Reference Caption](#minimax-h3-reference-caption) node upstream. Without it the
+  model invents a first frame that has nothing to do with your image.
 
 `model` offers the `writers` section of the model list plus every GGUF already in
 your ComfyUI model folders, whatever its architecture. Nothing here has to be
@@ -208,7 +212,68 @@ Audio 1: voice-timbre reference for the woman — low, unhurried, slight rasp
 ```
 
 — and the model binds the labels, picks the task type, and writes the retention
-analysis from them.
+analysis from them. Or let
+[MiniMax-H3 Reference Caption](#minimax-h3-reference-caption) write those lines
+for you from the assets themselves.
+
+### MiniMax-H3 Reference Caption
+
+The writer nodes read text, not pixels. This is where the text comes from:
+connect an image, an audio clip or a video, and a small multimodal model
+describes it into one labelled line of `reference_assets`.
+
+Measured on a 3.4 GB Qwen2.5-Omni-3B: **3 s for a frame, 2 s for an audio clip,
+5 s for a video.** It runs through the same llama.cpp binaries as everything else
+— `llama-mtmd-cli` ships in the archive the rewriter already fetches, so a
+machine that has run one rewrite downloads no runtime at all.
+
+**Chain them by wiring** `reference_assets` into the next node's `previous`. Each
+label is numbered *within its own category*, which is the guide's own rule
+(«`<Video N>` and `<Audio N>` are numbered independently»), so four assets come
+out as `Picture 1`, `Picture 2`, `Video 1`, `Audio 1` — not 1 through 4.
+
+`role` picks both the label and the question asked, and the questions differ on
+purpose:
+
+| `role` | What the model is asked for |
+|---|---|
+| `Subject` | the features that must stay consistent across shots — build, hair, clothing and their colours, carried objects |
+| `Picture` | the frame as a shot — style, shot size, camera angle, placement, environment, lighting |
+| `Video` | subjects, actions in order, camera movement, cuts and pacing |
+| `Audio` | **the sound, not the words** — voice timbre, apparent age and gender, delivery and rate, instrumentation, tempo, ambience |
+
+That last row is the one that matters. `<Audio N>` in the guide is usually a
+*timbre* reference, and a transcript throws away exactly the part that is needed,
+so the instruction says "do not transcribe" outright. If you also want the spoken
+words verbatim for a `<d>` block, that is an ASR job — run Whisper alongside and
+paste the line in.
+
+Other inputs:
+
+- `description` — type it yourself and **no model runs at all**. The fastest way
+  to add an asset you can describe in six words.
+- `instruction` — override the role's question entirely.
+- `max_frames` — how many frames to take from an IMAGE batch, spread evenly.
+  All of them would overflow both the context and the wall clock.
+- `context_size` — `0` means the model's own, which is what its projector was
+  sized against; one 1024×1024 frame is already twenty-odd media chunks. Lower it
+  only to cut the KV cache, and know that too small a value fails the run instead
+  of truncating it.
+
+> **Not every multimodal GGUF works here**, and the ones that do not fail loudly.
+> llama.cpp's `mtmd` has to understand the projector format: Gemma 4's aborts the
+> process outright on `b10310` — with Google's own file and with unsloth's alike,
+> on the CUDA and CPU builds alike — while `llama-completion` runs the same model
+> as text with no trouble. So the `captioners` list holds only pairs that have
+> actually been run:
+>
+> | Captioner | Download | Modalities |
+> |---|---|---|
+> | Qwen2.5-Omni-3B `Q4_K_M` + mmproj | 3.4 GB | image, audio, video |
+> | Qwen2.5-Omni-7B `Q4_K_M` + mmproj | 5.8 GB | image, audio, video |
+>
+> A model and its `mmproj` sitting together in one folder under `models/LLM` is
+> offered automatically, so you can try another without editing anything.
 
 ### MiniMax-H3 Guide Prompt (any LLM)
 
@@ -250,8 +315,8 @@ in your desktop's JSON editor — on the machine running ComfyUI, which is not
 necessarily the one looking at the browser tab. It is seeded from the packaged
 copy on first use, so updating the node pack never overwrites your edits.
 
-It holds two lists with identical fields. **`models`** feeds the LoRA rewriter and
-has to be Qwen3.6-27B:
+It holds three lists with the same fields. **`models`** feeds the LoRA rewriter
+and has to be Qwen3.6-27B:
 
 ```json
 {
@@ -276,6 +341,21 @@ language model with a chat template:
 }
 ```
 
+**`captioners`** feeds the reference caption node and needs one extra field,
+`mmproj` — a multimodal model is two files and both come from the same
+conversion:
+
+```json
+{
+  "name": "Qwen2.5-Omni-3B",
+  "repo": "ggml-org/Qwen2.5-Omni-3B-GGUF",
+  "file": "Qwen2.5-Omni-3B-Q4_K_M.gguf",
+  "mmproj": "mmproj-Qwen2.5-Omni-3B-Q8_0.gguf",
+  "format": "gguf",
+  "download_gb": 3.4
+}
+```
+
 `repo` may equally be an absolute path to a folder you already have. Add an entry,
 refresh the browser, and it is in the dropdown. Keep `name` stable — saved
 workflows remember the label, and a node whose stored choice has vanished says so
@@ -287,7 +367,8 @@ by name instead of silently picking something else.
 ComfyUI/models/LLM/
 ├── Qwen3.6-27B/                          # base model, ~52 GB
 ├── MiniMax-H3-Prompt-Rewriter-LoRA/      # adapter, ~3.5 GB
-└── Qwen3.5-9B-Q4_K_M.gguf                # a writer model, one file
+├── Qwen3.5-9B-Q4_K_M.gguf                # a writer model, one file
+└── Qwen2.5-Omni-3B/                      # a captioner: model + mmproj together
 
 ComfyUI/user/minimax_h3_rewriter/
 ├── models.json                           # your model list
@@ -502,6 +583,9 @@ so nothing breaks when the ComfyUI frontend updates.
 - **A chat template that rejects a system role still works.** Gemma's calls
   `raise_exception` on one; the guide is then folded into the first user turn, as
   those models' own cards prescribe.
+- **The captioner writes media to a temporary folder** — an IMAGE becomes PNGs, an
+  AUDIO a 16-bit WAV written with the standard library, a VIDEO its own file — and
+  removes the folder afterwards, including when the child process crashes.
 - The rewrite may add details a short prompt never stated. Review it before
   generating when identity, dialogue, timing or composition must be exact.
 

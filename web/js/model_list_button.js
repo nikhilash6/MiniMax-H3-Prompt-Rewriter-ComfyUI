@@ -5,6 +5,7 @@ const MODEL_LIST_NODES = [
     "MiniMaxH3PromptRewriter",
     "MiniMaxH3GuidedWriter",
     "MiniMaxH3GuidedWriterRef",
+    "MiniMaxH3ReferenceCaption",
 ];
 const GUIDE_NODES = [
     "MiniMaxH3GuidedWriter",
@@ -19,8 +20,8 @@ const MODEL_LIST = {
     fallback: "ComfyUI/user/minimax_h3_rewriter/models.json",
     tooltip:
         "Opens models.json in the ComfyUI user directory. 'models' feeds the LoRA " +
-        "rewriter, 'writers' feeds the guided writers. Refresh the browser to see " +
-        "your edits in the dropdown.",
+        "rewriter, 'writers' the guided writers, 'captioners' the reference caption " +
+        "node. Refresh the browser to see your edits in the dropdown.",
 };
 
 const GUIDE_FOLDER = {

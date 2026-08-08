@@ -86,6 +86,8 @@ BINARIES = (f"llama-completion{EXE}", f"llama-cli{EXE}")
 BINARY = BINARIES[0]
 SUBDIR = "runtime"
 
+MTMD_BINARIES = (f"llama-mtmd-cli{EXE}",)
+
 
 #: Compute capabilities the CUDA archive actually carries code for.
 #:
@@ -254,6 +256,23 @@ def _make_executable(directory: str) -> None:
 
 def download_size(backend: str) -> int:
     return sum(asset_sizes(assets(backend)).values())
+
+
+def ensure_mtmd(backend: str, auto_download: bool, progress=None) -> str:
+    """Return the path to ``llama-mtmd-cli``, fetching the release if allowed.
+
+    Same archive, same install directory: a captioner run on a machine that has
+    already rewritten a prompt downloads nothing.
+    """
+    ensure(backend, auto_download, progress)
+    directory = install_dir(resolve_backend(backend))
+    binary = find_binary(directory, MTMD_BINARIES)
+    if not binary:
+        raise RuntimeError(
+            f"'{MTMD_BINARIES[0]}' is not in '{directory}'. Release {RELEASE} should carry it "
+            f"beside {BINARY}; delete that folder to fetch the archive again."
+        )
+    return binary
 
 
 def ensure(backend: str, auto_download: bool, progress=None) -> str:

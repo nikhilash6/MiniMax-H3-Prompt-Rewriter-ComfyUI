@@ -36,6 +36,7 @@ class CatalogEntry:
     repo: str
     fmt: str = FORMAT_TRANSFORMERS
     file: str = ""
+    mmproj: str = ""
     download_gb: float = 0.0
     vram: str = ""
     note: str = ""
@@ -121,6 +122,7 @@ def _entries(data: dict, key: str) -> list[CatalogEntry]:
                     repo=str(raw["repo"]),
                     fmt=fmt,
                     file=str(raw.get("file") or ""),
+                    mmproj=str(raw.get("mmproj") or ""),
                     download_gb=float(raw.get("download_gb") or 0.0),
                     vram=str(raw.get("vram") or ""),
                     note=str(raw.get("note") or ""),
@@ -146,6 +148,18 @@ def writers() -> list[CatalogEntry]:
     """
     entries = _entries(_data(), "writers")
     return entries or _entries(_read(SEED_FILE), "writers")
+
+
+def captioners() -> list[CatalogEntry]:
+    """Multimodal models offered by the reference captioner node.
+
+    Shorter than it looks like it should be. Publishing a GGUF and an mmproj is
+    not the same as llama.cpp's ``mtmd`` being able to load them -- several
+    current models abort outright -- so this list holds only the ones that have
+    actually been run.
+    """
+    entries = _entries(_data(), "captioners")
+    return entries or _entries(_read(SEED_FILE), "captioners")
 
 
 def _adapter_from(data: dict, fmt: str) -> AdapterSpec:

@@ -27,7 +27,19 @@
     "'writers' is a separate list, for the guided writer nodes. Those carry the H3",
     "format in the system prompt instead of in a LoRA, so any instruction-following",
     "GGUF works and nothing here has to be Qwen3.6-27B. Same fields, gguf only.",
-    "Every GGUF already in your ComfyUI model folders is offered there too."
+    "Every GGUF already in your ComfyUI model folders is offered there too.",
+    "",
+    "'captioners' is the list for the reference captioner node, which describes an",
+    "image, an audio clip or a video so the Ref2VA writer knows what is in it. Those",
+    "entries need one extra field, 'mmproj': a multimodal model is two files and",
+    "both come from the same conversion.",
+    "",
+    "Be careful adding to it. Publishing a GGUF plus an mmproj is not the same as",
+    "llama.cpp's mtmd being able to load them: gemma-4's projector, for one, aborts",
+    "the process outright on b10310 with both Google's and unsloth's files. Every",
+    "entry below has actually been run. A local folder holding a model and its",
+    "mmproj side by side is offered automatically, so you can try one without",
+    "editing anything here."
   ],
   "adapters": {
     "transformers": {
@@ -212,6 +224,28 @@
       "download_gb": 13.4,
       "vram": "~17 GB with the guide in context",
       "note": "for a 16 GB card and up, when the 9B's prose is not enough"
+    }
+  ],
+  "captioners": [
+    {
+      "name": "Qwen2.5-Omni-3B",
+      "repo": "ggml-org/Qwen2.5-Omni-3B-GGUF",
+      "file": "Qwen2.5-Omni-3B-Q4_K_M.gguf",
+      "mmproj": "mmproj-Qwen2.5-Omni-3B-Q8_0.gguf",
+      "format": "gguf",
+      "download_gb": 3.4,
+      "vram": "~5 GB",
+      "note": "image, audio and video in one small model; verified against this pack"
+    },
+    {
+      "name": "Qwen2.5-Omni-7B",
+      "repo": "ggml-org/Qwen2.5-Omni-7B-GGUF",
+      "file": "Qwen2.5-Omni-7B-Q4_K_M.gguf",
+      "mmproj": "mmproj-Qwen2.5-Omni-7B-Q8_0.gguf",
+      "format": "gguf",
+      "download_gb": 5.8,
+      "vram": "~8 GB",
+      "note": "same modalities, better prose; step up when the 3B's captions are too plain"
     }
   ]
 }
