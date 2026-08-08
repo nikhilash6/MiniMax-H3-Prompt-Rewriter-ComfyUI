@@ -361,6 +361,34 @@ refresh the browser, and it is in the dropdown. Keep `name` stable — saved
 workflows remember the label, and a node whose stored choice has vanished says so
 by name instead of silently picking something else.
 
+#### Updates add new entries without touching yours
+
+Your copy is never overwritten, but models added to the pack after you installed
+**are merged in** — otherwise "we will not touch your list" quietly becomes "you
+will never see anything new", with nothing anywhere to say the node knew about
+more.
+
+The rule is set algebra, not a version check. Beside the lists your file records
+`seed_offered`: every name the packaged list has ever put in front of this
+installation. An update then adds
+
+```text
+names in the pack  −  names in your file  −  names you were already offered
+```
+
+so an entry you deleted stays deleted, one you renamed is not duplicated, and a
+genuinely new one arrives. Deleting a name from `seed_offered` offers that entry
+again on the next start.
+
+One exception, once: a file written before this existed has no record of what it
+was offered, so on the first update everything missing comes back — including
+anything you had deleted by hand. The previous file is kept beside it as
+`models.json.bak`, and from then on your deletions stick.
+
+Merges are logged to the ComfyUI console by name. A file the node cannot parse is
+left exactly as it is and the packaged list is used for that session, so a stray
+comma costs you a restart, not your edits.
+
 ## Where the weights go
 
 ```text

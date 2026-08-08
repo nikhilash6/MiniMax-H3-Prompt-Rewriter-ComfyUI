@@ -1,4 +1,5 @@
 {
+  "seed_version": "0.8.1",
   "_comment": [
     "Base models offered by the MiniMax-H3 Prompt Rewriter node.",
     "",
@@ -6,6 +7,14 @@
     "in the node's model dropdown after a browser refresh. It is copied into the",
     "ComfyUI user directory on first use, so updating the node pack never",
     "overwrites your edits.",
+    "",
+    "Entries added to the pack in later versions ARE merged into your copy, so a",
+    "model added after you installed still reaches you. Beside the lists you will",
+    "find 'seed_offered': every name the pack has already put in front of this",
+    "installation. Anything you delete is recorded there and never comes back;",
+    "anything genuinely new is not, and arrives. Delete a name from 'seed_offered'",
+    "and that entry will be offered again on the next start. The previous copy of",
+    "this file is kept beside it as models.json.bak whenever a merge happens.",
     "",
     "Fields:",
     "  name        label shown in the dropdown; keep it stable or saved workflows lose their choice",

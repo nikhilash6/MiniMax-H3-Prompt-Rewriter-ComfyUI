@@ -4,6 +4,23 @@ The shipped ``models.json`` is a seed, not the live file: it is copied into the
 ComfyUI user directory on first use and read from there afterwards, so updating
 the node pack never overwrites a list somebody has curated. The node's "Open
 model list" button opens that copy.
+
+**New entries are merged in, though**, because "we will not overwrite your list"
+turned into "you will never see a model added after you installed" -- a silent
+one. Somebody on 0.6.0 who updated to 0.6.2 kept getting the old quant list, with
+nothing anywhere to say the node knew about more.
+
+The merge is set algebra, not a version comparison. Beside the lists the live
+file records ``seed_offered``: every name the packaged list has *ever* put in
+front of this installation. An update then adds exactly
+
+    names in the seed  -  names in your file  -  names you were already offered
+
+so a model you deleted stays deleted, a model you renamed is not duplicated, and
+a genuinely new one arrives. The one exception is unavoidable and happens once:
+a file written before this mechanism existed has no record of what it was
+offered, so on the first update everything missing is added back, including
+anything deleted by hand. The previous file is kept beside it as ``.bak``.
 """
 
 from __future__ import annotations
@@ -12,6 +29,7 @@ import json
 import logging
 import os
 import shutil
+import tempfile
 from dataclasses import dataclass
 
 from .constants import ADAPTER_REPO
@@ -22,12 +40,18 @@ PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
 SEED_FILE = os.path.join(PACKAGE_DIR, "models.json")
 USER_SUBDIR = "minimax_h3_rewriter"
 FILE_NAME = "models.json"
+BACKUP_SUFFIX = ".bak"
 
 FORMAT_TRANSFORMERS = "transformers"
 FORMAT_GGUF = "gguf"
 FORMATS = (FORMAT_TRANSFORMERS, FORMAT_GGUF)
 
 PLACEHOLDER = "REPLACE_ME"
+
+SECTIONS = ("models", "writers", "captioners")
+
+OFFERED_KEY = "seed_offered"
+VERSION_KEY = "seed_version"
 
 
 @dataclass
@@ -99,11 +123,126 @@ def _read(path: str) -> dict:
         return {}
 
 
+def _names(entries) -> list[str]:
+    if not isinstance(entries, list):
+        return []
+    return [str(raw["name"]) for raw in entries if isinstance(raw, dict) and raw.get("name")]
+
+
+def merge(live: dict, seed: dict) -> tuple[dict, list[str]]:
+    """Fold new seed entries into a live list. Returns ``(merged, what changed)``.
+
+    Pure, so the rule is testable without a filesystem: nothing here reads or
+    writes anything.
+    """
+    merged = dict(live)
+    offered = dict(merged.get(OFFERED_KEY) or {})
+    changes: list[str] = []
+
+    for section in SECTIONS:
+        available = seed.get(section)
+        if not isinstance(available, list) or not available:
+            continue
+
+        current = merged.get(section)
+        if not isinstance(current, list):
+            # The section did not exist at all -- this installation predates it.
+            merged[section] = list(available)
+            changes.append(f"{section}: added {len(available)} (section is new)")
+        else:
+            known = set(_names(current))
+            seen = set(offered.get(section) or [])
+            fresh = [
+                raw for raw in available
+                if isinstance(raw, dict) and raw.get("name")
+                and raw["name"] not in known and raw["name"] not in seen
+            ]
+            if fresh:
+                merged[section] = current + fresh
+                changes.append(f"{section}: added {', '.join(_names(fresh))}")
+
+        offered[section] = sorted(set(offered.get(section) or []) | set(_names(available)))
+
+    if offered == (live.get(OFFERED_KEY) or {}) and not changes:
+        return merged, changes
+
+    merged[OFFERED_KEY] = offered
+    version = seed.get(VERSION_KEY)
+    if version:
+        merged[VERSION_KEY] = version
+    return merged, changes
+
+
+def _write(path: str, data: dict) -> None:
+    """Replace the live file atomically, keeping one step back as ``.bak``."""
+    directory = os.path.dirname(path) or "."
+    handle, staging = tempfile.mkstemp(prefix=FILE_NAME, suffix=".part", dir=directory)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as file:
+            json.dump(data, file, ensure_ascii=False, indent=2)
+            file.write("\n")
+        if os.path.isfile(path):
+            shutil.copyfile(path, path + BACKUP_SUFFIX)
+        os.replace(staging, path)
+    except OSError:
+        try:
+            os.unlink(staging)
+        except OSError:
+            pass
+        raise
+
+
+_DATA_CACHE: dict[tuple, dict] = {}
+
+
 def _data() -> dict:
-    data = _read(user_file())
-    if not data.get("models"):
-        data = _read(SEED_FILE)
-    return data
+    """The live list, with anything new from the packaged one folded in.
+
+    Cached per file identity: ``INPUT_TYPES`` runs on every graph validation and
+    re-reading two files each time would be wasteful. Writing the merge back
+    changes the mtime, so the next call re-reads and finds nothing left to do.
+    """
+    path = user_file()
+    try:
+        stat = os.stat(path)
+        key = (os.path.normcase(path), stat.st_size, int(stat.st_mtime))
+    except OSError:
+        key = None
+
+    if key is not None:
+        cached = _DATA_CACHE.get(key)
+        if cached is not None:
+            return cached
+
+    live = _read(path)
+    seed = _read(SEED_FILE)
+    if not live:
+        return seed
+
+    merged, changes = merge(live, seed)
+    if merged != live and path != SEED_FILE:
+        try:
+            _write(path, merged)
+            for line in changes:
+                log.info("[minimax_h3_rewriter.catalog] %s", line)
+            if changes:
+                log.info(
+                    "[minimax_h3_rewriter.catalog] merged into %s (previous copy at %s)",
+                    path, path + BACKUP_SUFFIX,
+                )
+        except OSError as error:
+            log.warning("[minimax_h3_rewriter.catalog] could not update %s: %s", path, error)
+        else:
+            try:
+                stat = os.stat(path)
+                key = (os.path.normcase(path), stat.st_size, int(stat.st_mtime))
+            except OSError:
+                key = None
+
+    if key is not None:
+        _DATA_CACHE.clear()
+        _DATA_CACHE[key] = merged
+    return merged
 
 
 def _entries(data: dict, key: str) -> list[CatalogEntry]:
@@ -139,15 +278,8 @@ def load() -> list[CatalogEntry]:
 
 
 def writers() -> list[CatalogEntry]:
-    """General-purpose models offered by the guided writer nodes.
-
-    A list seeded before this section existed has no ``writers`` key at all, and
-    the seed is only ever copied once. Rather than rewrite somebody's file, an
-    absent section falls back to the packaged one — the same rule ``adapter``
-    follows, and for the same reason.
-    """
-    entries = _entries(_data(), "writers")
-    return entries or _entries(_read(SEED_FILE), "writers")
+    """General-purpose models offered by the guided writer nodes."""
+    return _entries(_data(), "writers")
 
 
 def captioners() -> list[CatalogEntry]:
@@ -158,8 +290,7 @@ def captioners() -> list[CatalogEntry]:
     current models abort outright -- so this list holds only the ones that have
     actually been run.
     """
-    entries = _entries(_data(), "captioners")
-    return entries or _entries(_read(SEED_FILE), "captioners")
+    return _entries(_data(), "captioners")
 
 
 def _adapter_from(data: dict, fmt: str) -> AdapterSpec:
