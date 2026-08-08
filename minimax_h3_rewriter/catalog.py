@@ -105,10 +105,9 @@ def _data() -> dict:
     return data
 
 
-def load() -> list[CatalogEntry]:
-    """Entries from the live list, falling back to the packaged seed."""
+def _entries(data: dict, key: str) -> list[CatalogEntry]:
     entries = []
-    for raw in _data().get("models", []):
+    for raw in data.get(key, []):
         if not isinstance(raw, dict) or not raw.get("repo") or not raw.get("name"):
             continue
         fmt = str(raw.get("format") or FORMAT_TRANSFORMERS).lower()
@@ -130,6 +129,23 @@ def load() -> list[CatalogEntry]:
         except (TypeError, ValueError):
             log.warning("[minimax_h3_rewriter.catalog] skipping malformed entry %r", raw)
     return entries
+
+
+def load() -> list[CatalogEntry]:
+    """Base models for the LoRA rewriter, from the live list or the seed."""
+    return _entries(_data(), "models")
+
+
+def writers() -> list[CatalogEntry]:
+    """General-purpose models offered by the guided writer nodes.
+
+    A list seeded before this section existed has no ``writers`` key at all, and
+    the seed is only ever copied once. Rather than rewrite somebody's file, an
+    absent section falls back to the packaged one — the same rule ``adapter``
+    follows, and for the same reason.
+    """
+    entries = _entries(_data(), "writers")
+    return entries or _entries(_read(SEED_FILE), "writers")
 
 
 def _adapter_from(data: dict, fmt: str) -> AdapterSpec:

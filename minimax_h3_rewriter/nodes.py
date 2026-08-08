@@ -6,7 +6,17 @@ import logging
 import os
 from dataclasses import dataclass
 
-from . import catalog, cli_engine, discovery, download, engine, gguf_engine, llamacpp
+from . import (
+    catalog,
+    cli_engine,
+    discovery,
+    download,
+    engine,
+    gguf_engine,
+    guide_prompt,
+    guides,
+    llamacpp,
+)
 from .catalog import FORMAT_GGUF, FORMAT_TRANSFORMERS
 from .constants import (
     ADAPTER_FILES,
@@ -19,14 +29,16 @@ from .constants import (
     GGUF_RUNTIMES,
     OUTPUT_FIELDS,
     QUANTIZATIONS,
+    REF_OUTPUT_FIELDS,
     RESOLUTIONS,
     RUNTIME_AUTO,
     RUNTIME_BINARY,
     RUNTIME_WHEEL,
 )
-from .fields import split_fields
+from .fields import missing, split_fields, split_sections
 from .paths import adapter_is_complete, base_model_is_complete, models_root, resolve_source
 from .progress import NodeProgress, TransferReporter
+from .prompt_template import build_messages
 
 log = logging.getLogger(__name__)
 
@@ -121,6 +133,54 @@ def _resolve_model_choice(choice: str) -> Choice:
     raise RuntimeError(
         f"'{choice}' is not in the model list any more. Pick another entry, or add it back "
         f"with the 'Open model list' button ({catalog.user_file()})."
+    )
+
+
+_WRITER_MAP: dict[str, Choice] = {}
+
+
+def _build_writer_map() -> dict[str, Choice]:
+    """The guided writers' model list: any GGUF, not just the adapter's base.
+
+    Nothing here is verified against an architecture, because there is nothing to
+    match: the format lives in the system prompt, so the only requirement is that
+    the file is a GGUF language model with a chat template. That is what makes a
+    4B on an 8 GB card a real answer rather than a consolation prize.
+    """
+    mapping: dict[str, Choice] = {}
+    try:
+        for entry in catalog.writers():
+            mapping[entry.label] = Choice(reference=entry.repo, fmt=FORMAT_GGUF, file=entry.file)
+    except Exception:
+        log.warning("[minimax_h3_rewriter._build_writer_map] catalog unreadable", exc_info=True)
+    try:
+        for label, path in discovery.scan_writer_gguf():
+            mapping[f"{LOCAL_PREFIX}{label}"] = Choice(reference=path, fmt=FORMAT_GGUF, local=True)
+    except Exception:
+        log.warning("[minimax_h3_rewriter._build_writer_map] gguf scan failed", exc_info=True)
+
+    _WRITER_MAP.clear()
+    _WRITER_MAP.update(mapping)
+    return mapping
+
+
+def writer_choices() -> list[str]:
+    choices = list(_build_writer_map())
+    return choices or ["(no GGUF model found — see the model list)"]
+
+
+def _resolve_writer_choice(choice: str) -> Choice:
+    found = _WRITER_MAP.get(choice)
+    if found is None:
+        found = _build_writer_map().get(choice)
+    if found is not None:
+        return found
+    if choice and choice.lower().endswith(".gguf") and os.path.isfile(choice):
+        return Choice(reference=choice, fmt=FORMAT_GGUF, local=True)
+    raise RuntimeError(
+        f"'{choice}' is not in the writer model list any more. Pick another entry, drop a "
+        f"'.gguf' into ComfyUI's models/LLM folder, or add it under \"writers\" in "
+        f"{catalog.user_file()}."
     )
 
 
@@ -458,9 +518,7 @@ class MiniMaxH3PromptRewriter:
         choice = _resolve_model_choice(model)
 
         decoding = {
-            "prompt": prompt,
-            "resolution": resolution,
-            "duration": int(duration),
+            "messages": build_messages(prompt, resolution, int(duration)),
             "seed": int(seed),
             "greedy": greedy,
             "max_new_tokens": int(settings["max_new_tokens"]),
@@ -540,12 +598,475 @@ class MiniMaxH3PromptRewriter:
         return (text,) + tuple(fields[name] for name in OUTPUT_FIELDS)
 
 
+REFERENCE_PLACEHOLDER = (
+    "Describe what the reference frames show, one per line:\n"
+    "Picture 1: ...\n"
+)
+
+REFERENCE_ASSETS_PLACEHOLDER = (
+    "List every reference asset, one per line:\n"
+    "Picture 1: young woman, long dark hair, blue cardigan, seated by a window\n"
+    "Video 1: source clip being edited — handheld walk down a night street\n"
+    "Audio 1: voice-timbre reference for the woman\n"
+)
+
+
+def _guided_text(
+    mode: str,
+    model: str,
+    prompt: str,
+    resolution: str,
+    duration: int,
+    references: str,
+    greedy: bool,
+    seed: int,
+    keep_model_loaded: bool,
+    settings: dict,
+    progress: NodeProgress,
+) -> str:
+    """Run one guided rewrite and return the model's raw answer."""
+    choice = _resolve_writer_choice(model)
+    if choice.local:
+        model_path = choice.reference
+    else:
+        model_path = _ensure_file(
+            choice.reference, choice.file, "Writer model", settings["auto_download"], progress
+        )
+
+    if discovery.gguf_header(model_path)["kind"] == "adapter":
+        raise RuntimeError(
+            f"'{os.path.basename(model_path)}' is a LoRA adapter, not a model that can be run "
+            f"on its own. Pick a base model from the list."
+        )
+
+    guide = guides.text(
+        guide_prompt.GUIDE_FOR_MODE[mode], settings["auto_download"], progress
+    )
+    messages = guide_prompt.build_messages(
+        guide, mode, prompt, resolution, int(duration), references
+    )
+
+    max_new_tokens = int(settings["max_new_tokens"])
+    n_ctx = int(settings["n_ctx"])
+    needed = guide_prompt.context_needed(messages, max_new_tokens)
+    if needed > n_ctx:
+        log.info(
+            "[minimax_h3_rewriter._guided_text] raising n_ctx from %d to %d for the %s guide",
+            n_ctx, needed, mode,
+        )
+        progress.text(
+            f"{mode}: the guide needs a {needed}-token context, raising n_ctx from {n_ctx}",
+            force=True,
+        )
+        n_ctx = needed
+
+    common = dict(
+        model_path=model_path,
+        adapter_path=None,
+        gpu_layers=int(settings["gpu_layers"]),
+        n_ctx=n_ctx,
+        keep_loaded=keep_model_loaded,
+        progress=progress,
+        messages=messages,
+        seed=int(seed),
+        greedy=greedy,
+        max_new_tokens=max_new_tokens,
+        temperature=float(settings["temperature"]),
+        top_p=float(settings["top_p"]),
+        top_k=int(settings["top_k"]),
+        repetition_penalty=float(settings["repetition_penalty"]),
+    )
+
+    runtime = settings.get("gguf_runtime", RUNTIME_AUTO)
+    if runtime == RUNTIME_AUTO:
+        runtime = RUNTIME_WHEEL if gguf_engine.available() else RUNTIME_BINARY
+
+    if runtime == RUNTIME_WHEEL:
+        if not gguf_engine.available():
+            raise RuntimeError(
+                f"gguf_runtime is set to '{RUNTIME_WHEEL}', but it is not importable here. "
+                f"Install it, or set gguf_runtime to '{RUNTIME_AUTO}' or '{RUNTIME_BINARY}' to "
+                f"run the official binaries instead.\n\n" + gguf_engine.INSTALL_HINT
+            )
+        return gguf_engine.rewrite(**common)
+    return cli_engine.rewrite(
+        backend=settings["llama_backend"],
+        auto_download=settings["auto_download"],
+        **common,
+    )
+
+
+def _report(progress: NodeProgress, text: str, sections: dict, names: tuple[str, ...]) -> None:
+    """Leave the answer on the node, and say so when it is not the right shape."""
+    absent = missing(sections, names)
+    note = ""
+    if absent:
+        note = (
+            f"⚠ {len(absent)} field(s) not found in the answer: {', '.join(absent)}\n"
+            f"Lower the temperature, or try a larger writer model.\n\n"
+        )
+        log.warning("[minimax_h3_rewriter._report] fields missing from the rewrite: %s", absent)
+    progress.text(note + (text[-2000:] if text else "(empty rewrite)"), force=True)
+
+
+class MiniMaxH3GuidedWriter:
+    """Write a T2VA/I2VA/FL2VA/L2VA prompt with any model, guided rather than trained."""
+
+    DESCRIPTION = (
+        "Writes a MiniMax-H3 audio-video description from MiniMax's own writing guide, which "
+        "goes into the system prompt. No LoRA, so any instruction-following GGUF can run it — "
+        "a 4B on an 8 GB card instead of Qwen3.6-27B. The guide is fetched from "
+        "MiniMaxAI/MiniMax-H3 on first use. Outputs match the LoRA rewriter node, so the two "
+        "are interchangeable in a workflow."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "prompt": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "tooltip": "The short prompt to expand into an H3 audio-video description.",
+                    },
+                ),
+                "model": (
+                    writer_choices(),
+                    {
+                        "tooltip": (
+                            "Any GGUF language model. Entries prefixed 'on disk:' are already "
+                            "in your ComfyUI model folders; the rest are fetched on first use. "
+                            "Nothing has to be installed: without llama-cpp-python the node "
+                            "runs the official llama.cpp binaries."
+                        ),
+                    },
+                ),
+                "task": (
+                    list(guide_prompt.BASE_MODES),
+                    {
+                        "default": "T2VA",
+                        "tooltip": (
+                            "T2VA: text only. I2VA: the reference image is the first frame. "
+                            "FL2VA: first and last frame. L2VA: the reference image is the last "
+                            "frame. Everything but T2VA also writes the alignment instruction "
+                            "line, with the duration already filled in."
+                        ),
+                    },
+                ),
+                "resolution": (
+                    list(RESOLUTIONS),
+                    {"default": "16:9", "tooltip": "Target aspect ratio the rewrite is composed for."},
+                ),
+                "duration": (
+                    "INT",
+                    {
+                        "default": 10,
+                        "min": DURATION_MIN,
+                        "max": DURATION_MAX,
+                        "step": 1,
+                        "tooltip": "Target clip length in seconds; drives shot count and pacing.",
+                    },
+                ),
+                "greedy": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": (
+                            "Deterministic decoding. Worth keeping on for small models, which "
+                            "drift out of the format when they sample."
+                        ),
+                    },
+                ),
+                "seed": (
+                    "INT",
+                    {
+                        "default": 42,
+                        "min": 0,
+                        "max": 0xFFFFFFFF,
+                        "control_after_generate": True,
+                    },
+                ),
+                "keep_model_loaded": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": (
+                            "Keep the writer in VRAM after the rewrite. Leave off when the same "
+                            "GPU has to run MiniMax-H3 video generation afterwards."
+                        ),
+                    },
+                ),
+            },
+            "optional": {
+                "reference_material": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "tooltip": (
+                            "This node reads text, not pixels. For I2VA, FL2VA and L2VA, "
+                            "describe what the reference frames show — by hand, or from a "
+                            "captioner node — so the rewrite is anchored to them.\n\n"
+                            + REFERENCE_PLACEHOLDER
+                        ),
+                    },
+                ),
+                "options": (OPTIONS_TYPE,),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ("STRING",) * (1 + len(OUTPUT_FIELDS))
+    RETURN_NAMES = ("rewritten_prompt",) + OUTPUT_FIELDS
+    FUNCTION = "write"
+    CATEGORY = CATEGORY
+
+    def write(
+        self,
+        prompt,
+        model,
+        task,
+        resolution,
+        duration,
+        greedy,
+        seed,
+        keep_model_loaded,
+        reference_material="",
+        options=None,
+        unique_id=None,
+    ):
+        settings = dict(DEFAULT_OPTIONS)
+        if options:
+            settings.update(options)
+        progress = NodeProgress(unique_id)
+
+        text = _guided_text(
+            task, model, prompt, resolution, duration, reference_material,
+            greedy, seed, keep_model_loaded, settings, progress,
+        )
+        _head, sections = split_sections(text, OUTPUT_FIELDS)
+        _report(progress, text, sections, OUTPUT_FIELDS)
+        return (text,) + tuple(sections[name] for name in OUTPUT_FIELDS)
+
+
+class MiniMaxH3GuidedWriterRef:
+    """Write a full-reference (Ref2VA) prompt with any model."""
+
+    DESCRIPTION = (
+        "Writes a MiniMax-H3 full-reference (Ref2VA) description — six sections, with "
+        "<Subject>/<Picture>/<Video>/<Audio> labels and a retention analysis — from MiniMax's "
+        "own full-reference guide, which goes into the system prompt. No LoRA, so any "
+        "instruction-following GGUF can run it. The guide is fetched from MiniMaxAI/MiniMax-H3 "
+        "on first use."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "prompt": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "tooltip": "What the target video should show, and how it uses the references.",
+                    },
+                ),
+                "reference_assets": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "tooltip": (
+                            "Required. One asset per line — the node reads text, not pixels, so "
+                            "this is all the model knows about them. Label them Picture N, "
+                            "Video N or Audio N and say what each one is for.\n\n"
+                            + REFERENCE_ASSETS_PLACEHOLDER
+                        ),
+                    },
+                ),
+                "model": (
+                    writer_choices(),
+                    {
+                        "tooltip": (
+                            "Any GGUF language model. The full-reference guide is the longer of "
+                            "the two, so a 4B will hold the format but a 9B keeps the labels "
+                            "consistent across all six sections."
+                        ),
+                    },
+                ),
+                "resolution": (
+                    list(RESOLUTIONS),
+                    {"default": "16:9", "tooltip": "Target aspect ratio the rewrite is composed for."},
+                ),
+                "duration": (
+                    "INT",
+                    {
+                        "default": 10,
+                        "min": DURATION_MIN,
+                        "max": DURATION_MAX,
+                        "step": 1,
+                        "tooltip": "Target clip length in seconds; drives shot count and pacing.",
+                    },
+                ),
+                "greedy": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "Deterministic decoding. Keep it on unless the result is too plain.",
+                    },
+                ),
+                "seed": (
+                    "INT",
+                    {
+                        "default": 42,
+                        "min": 0,
+                        "max": 0xFFFFFFFF,
+                        "control_after_generate": True,
+                    },
+                ),
+                "keep_model_loaded": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Keep the writer in VRAM after the rewrite.",
+                    },
+                ),
+            },
+            "optional": {
+                "options": (OPTIONS_TYPE,),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ("STRING",) * (1 + len(REF_OUTPUT_FIELDS))
+    RETURN_NAMES = ("rewritten_prompt",) + REF_OUTPUT_FIELDS
+    FUNCTION = "write"
+    CATEGORY = CATEGORY
+
+    def write(
+        self,
+        prompt,
+        reference_assets,
+        model,
+        resolution,
+        duration,
+        greedy,
+        seed,
+        keep_model_loaded,
+        options=None,
+        unique_id=None,
+    ):
+        settings = dict(DEFAULT_OPTIONS)
+        if options:
+            settings.update(options)
+        progress = NodeProgress(unique_id)
+
+        text = _guided_text(
+            guide_prompt.REF_MODE, model, prompt, resolution, duration, reference_assets,
+            greedy, seed, keep_model_loaded, settings, progress,
+        )
+        _head, sections = split_sections(text, REF_OUTPUT_FIELDS, fallback="detailed_description")
+        _report(progress, text, sections, REF_OUTPUT_FIELDS)
+        return (text,) + tuple(sections[name] for name in REF_OUTPUT_FIELDS)
+
+
+class MiniMaxH3GuidePrompt:
+    """The guide-based system and user messages, for any other LLM node to run."""
+
+    DESCRIPTION = (
+        "Builds the system and user prompt from MiniMax's writing guide and returns them as "
+        "strings, without running anything. Wire them into whatever LLM node you already use — "
+        "local, API, or remote — when you would rather not run the model here. Costs no VRAM "
+        "and no time."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "prompt": ("STRING", {"multiline": True, "default": ""}),
+                "task": (
+                    list(guide_prompt.ALL_MODES),
+                    {
+                        "default": "T2VA",
+                        "tooltip": "Ref2VA uses the full-reference guide and its six output sections.",
+                    },
+                ),
+                "resolution": (list(RESOLUTIONS), {"default": "16:9"}),
+                "duration": (
+                    "INT",
+                    {"default": 10, "min": DURATION_MIN, "max": DURATION_MAX, "step": 1},
+                ),
+            },
+            "optional": {
+                "reference_material": (
+                    "STRING",
+                    {
+                        "multiline": True,
+                        "default": "",
+                        "tooltip": (
+                            "What the reference frames or assets show. Required for Ref2VA.\n\n"
+                            + REFERENCE_ASSETS_PLACEHOLDER
+                        ),
+                    },
+                ),
+                "auto_download": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": (
+                            "Fetch the guide from MiniMaxAI/MiniMax-H3 if it is not already in "
+                            "the ComfyUI user directory."
+                        ),
+                    },
+                ),
+            },
+            "hidden": {"unique_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("system_prompt", "user_prompt")
+    FUNCTION = "build"
+    CATEGORY = CATEGORY
+
+    def build(
+        self,
+        prompt,
+        task,
+        resolution,
+        duration,
+        reference_material="",
+        auto_download=True,
+        unique_id=None,
+    ):
+        progress = NodeProgress(unique_id)
+        guide = guides.text(guide_prompt.GUIDE_FOR_MODE[task], auto_download, progress)
+        messages = guide_prompt.build_messages(
+            guide, task, prompt, resolution, int(duration), reference_material
+        )
+        system, user = messages[0]["content"], messages[1]["content"]
+        progress.finish(
+            f"{task} · system {len(system)} chars · user {len(user)} chars\n"
+            f"about {guide_prompt.context_needed(messages, 0)} tokens of context before the answer"
+        )
+        return (system, user)
+
+
 NODE_CLASS_MAPPINGS = {
     "MiniMaxH3PromptRewriter": MiniMaxH3PromptRewriter,
     "MiniMaxH3RewriterOptions": MiniMaxH3RewriterOptions,
+    "MiniMaxH3GuidedWriter": MiniMaxH3GuidedWriter,
+    "MiniMaxH3GuidedWriterRef": MiniMaxH3GuidedWriterRef,
+    "MiniMaxH3GuidePrompt": MiniMaxH3GuidePrompt,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "MiniMaxH3PromptRewriter": "MiniMax-H3 Prompt Rewriter",
     "MiniMaxH3RewriterOptions": "MiniMax-H3 Rewriter Options",
+    "MiniMaxH3GuidedWriter": "MiniMax-H3 Prompt Writer (T2VA/I2VA/FL2VA/L2VA)",
+    "MiniMaxH3GuidedWriterRef": "MiniMax-H3 Prompt Writer (Ref2VA)",
+    "MiniMaxH3GuidePrompt": "MiniMax-H3 Guide Prompt (any LLM)",
 }

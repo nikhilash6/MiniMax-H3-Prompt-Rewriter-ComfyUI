@@ -44,6 +44,29 @@ def _environment():
     return env
 
 
+def _fold_system(messages: list[dict[str, str]]) -> list[dict[str, str]] | None:
+    """Move a leading system message into the first user turn.
+
+    Not every chat template accepts a system role -- Gemma's calls
+    ``raise_exception`` on one, and it is not alone. Since the guided writers put
+    a whole writing guide in that message, dropping it is not an option and
+    refusing the model is a poor answer to "run this on anything". Prepending it
+    to the first user turn is what those templates' own model cards prescribe.
+
+    Returns ``None`` when there is nothing to fold, so the caller can re-raise
+    the original error instead of pretending it tried something.
+    """
+    if not messages or messages[0].get("role") != "system":
+        return None
+    system = (messages[0].get("content") or "").strip()
+    rest = [dict(message) for message in messages[1:]]
+    for message in rest:
+        if message.get("role") == "user":
+            message["content"] = f"{system}\n\n{message.get('content') or ''}".strip()
+            return rest
+    return None
+
+
 def render(
     template: str,
     messages: list[dict[str, str]],
@@ -55,15 +78,30 @@ def render(
     if not template:
         raise TemplateError("the model file carries no chat template")
 
-    rendered = _environment().from_string(template).render(
-        messages=messages,
-        add_generation_prompt=add_generation_prompt,
-        enable_thinking=enable_thinking,
-        bos_token=bos_token,
-        eos_token=eos_token,
-        tools=None,
-    )
-    return rendered
+    def attempt(payload):
+        return _environment().from_string(template).render(
+            messages=payload,
+            add_generation_prompt=add_generation_prompt,
+            enable_thinking=enable_thinking,
+            bos_token=bos_token,
+            eos_token=eos_token,
+            tools=None,
+        )
+
+    try:
+        return attempt(messages)
+    except Exception as error:
+        folded = _fold_system(messages)
+        if folded is None:
+            raise
+        log.debug(
+            "[minimax_h3_rewriter.chat_template.render] template rejected the system role (%s), "
+            "folding it into the first user turn", error,
+        )
+        try:
+            return attempt(folded)
+        except Exception:
+            raise error
 
 
 def from_metadata(metadata: dict, messages: list[dict[str, str]], **kwargs) -> str:

@@ -37,7 +37,6 @@ import time
 from . import chat_template, llamacpp
 from .constants import normalize_seed
 from .progress import NodeProgress
-from .prompt_template import build_messages
 
 log = logging.getLogger(__name__)
 
@@ -78,6 +77,8 @@ ALL_LAYERS = 999
 CHARS_PER_TOKEN = 4.0
 
 _PERF = re.compile(r"eval time =.*?\(\s*([\d.]+)\s*ms per token,\s*([\d.]+)\s*tokens per second\)")
+
+_END_MARKER = re.compile(r"\s*\[end of text\]\s*$")
 _METADATA_CACHE: dict[tuple[str, int, int], dict] = {}
 
 
@@ -139,8 +140,7 @@ def gguf_metadata(model_path: str) -> dict:
     return metadata
 
 
-def render_prompt(model_path: str, prompt: str, resolution: str, duration: int) -> str:
-    messages = build_messages(prompt, resolution, duration)
+def render_prompt(model_path: str, messages: list[dict[str, str]]) -> str:
     return chat_template.from_metadata(gguf_metadata(model_path), messages, enable_thinking=False)
 
 
@@ -233,9 +233,7 @@ def generate(
     binary: str,
     model_path: str,
     adapter_path: str | None,
-    prompt: str,
-    resolution: str,
-    duration: int,
+    messages: list[dict[str, str]],
     gpu_layers: int,
     n_ctx: int,
     seed: int,
@@ -247,7 +245,7 @@ def generate(
     repetition_penalty: float,
     progress: NodeProgress | None = None,
 ) -> str:
-    rendered = render_prompt(model_path, prompt, resolution, duration)
+    rendered = render_prompt(model_path, messages)
 
     handle, prompt_file = tempfile.mkstemp(prefix="minimax_h3_", suffix=".txt")
     with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as file:
@@ -353,7 +351,7 @@ def generate(
             f"llama-cli exited with code {process.returncode}.\n{tail}"
         )
 
-    text = "".join(pieces).strip()
+    text = _END_MARKER.sub("", "".join(pieces).strip()).strip()
     if progress is not None:
         progress.finish(f"Done · {len(text)} chars{_speed(stderr_text)}")
     return text

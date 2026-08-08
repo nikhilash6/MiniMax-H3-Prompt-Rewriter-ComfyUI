@@ -455,7 +455,13 @@ def _gguf_candidates(root: str, depth: int) -> list[str]:
     return found
 
 
-def _scan_gguf(kind: str) -> list[tuple[str, str]]:
+def _scan_gguf(kind: str, arch: str | None = GGUF_ARCH) -> list[tuple[str, str]]:
+    """``(label, path)`` for local GGUFs of one kind, optionally one architecture.
+
+    ``arch=None`` accepts anything readable, which is what the guided writers
+    want: they carry the format in the prompt rather than in an adapter, so any
+    instruction-following model will do and the label says which one it is.
+    """
     found: list[tuple[str, str]] = []
     seen: set[str] = set()
 
@@ -465,14 +471,20 @@ def _scan_gguf(kind: str) -> list[tuple[str, str]]:
             if key in seen:
                 continue
             seen.add(key)
-            arch, file_kind = gguf_info(path)
-            if arch != GGUF_ARCH or file_kind != kind:
+            header = gguf_header(path)
+            if not header["arch"] or header["kind"] != kind:
+                continue
+            if arch is not None and header["arch"] != arch:
                 continue
             try:
                 size = os.path.getsize(path) / 1024 ** 3
             except OSError:
                 size = 0.0
-            found.append((f"{os.path.basename(path)} [gguf, {size:.1f} GB]", path))
+            tag = "gguf" if arch is not None else header["arch"]
+            label = f"{os.path.basename(path)} [{tag}, {size:.1f} GB]"
+            if arch is not None and kind == "model" and gguf_problem(path):
+                label += " (wrong size for the adapter)"
+            found.append((label, path))
 
     return found
 
@@ -489,3 +501,8 @@ def scan_local_gguf() -> list[tuple[str, str]]:
 def scan_local_gguf_adapters() -> list[tuple[str, str]]:
     """Return ``(label, path)`` for local GGUF LoRA adapters for this architecture."""
     return _scan_gguf("adapter")
+
+
+def scan_writer_gguf() -> list[tuple[str, str]]:
+    """Return ``(label, path)`` for every local GGUF base model, any architecture."""
+    return _scan_gguf("model", arch=None)

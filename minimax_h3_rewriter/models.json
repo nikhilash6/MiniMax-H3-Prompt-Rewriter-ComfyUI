@@ -22,7 +22,12 @@
     "",
     "gguf builds need llama-cpp-python installed, and use the GGUF adapter below",
     "rather than the PEFT one. They are the low-VRAM route: a Q4_K_M base is 15.7 GB",
-    "instead of 52 GB, and the IQ2/IQ3 quants go lower still at some quality cost."
+    "instead of 52 GB, and the IQ2/IQ3 quants go lower still at some quality cost.",
+    "",
+    "'writers' is a separate list, for the guided writer nodes. Those carry the H3",
+    "format in the system prompt instead of in a LoRA, so any instruction-following",
+    "GGUF works and nothing here has to be Qwen3.6-27B. Same fields, gguf only.",
+    "Every GGUF already in your ComfyUI model folders is offered there too."
   ],
   "adapters": {
     "transformers": {
@@ -160,6 +165,53 @@
       "download_gb": 16.3,
       "vram": "~20 GB with the adapter",
       "note": "abliterated fine-tune, not the base the LoRA was trained on"
+    }
+  ],
+  "writers": [
+    {
+      "name": "Qwen3.5-4B",
+      "repo": "unsloth/Qwen3.5-4B-GGUF",
+      "file": "Qwen3.5-4B-Q4_K_M.gguf",
+      "format": "gguf",
+      "download_gb": 2.6,
+      "vram": "~5 GB with the guide in context",
+      "note": "smallest that still holds the format; start here on an 8 GB card"
+    },
+    {
+      "name": "Qwen3.5-9B",
+      "repo": "unsloth/Qwen3.5-9B-GGUF",
+      "file": "Qwen3.5-9B-Q4_K_M.gguf",
+      "format": "gguf",
+      "download_gb": 5.3,
+      "vram": "~8 GB with the guide in context",
+      "note": "best writing per gigabyte; lower gpu_layers if 8 GB is tight"
+    },
+    {
+      "name": "Qwen3.5-9B Uncensored (HauhauCS)",
+      "repo": "HauhauCS/Qwen3.5-9B-Uncensored-HauhauCS-Aggressive",
+      "file": "Qwen3.5-9B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf",
+      "format": "gguf",
+      "download_gb": 5.2,
+      "vram": "~8 GB with the guide in context",
+      "note": "abliterated fine-tune: does not refuse scenes the stock model declines to describe"
+    },
+    {
+      "name": "Gemma 3 12B Instruct",
+      "repo": "unsloth/gemma-3-12b-it-GGUF",
+      "file": "gemma-3-12b-it-Q4_K_M.gguf",
+      "format": "gguf",
+      "download_gb": 6.8,
+      "vram": "~10 GB with the guide in context",
+      "note": "non-Qwen alternative; its chat template takes no system role, which the node handles"
+    },
+    {
+      "name": "Mistral Small 3.2 24B Instruct",
+      "repo": "unsloth/Mistral-Small-3.2-24B-Instruct-2506-GGUF",
+      "file": "Mistral-Small-3.2-24B-Instruct-2506-Q4_K_M.gguf",
+      "format": "gguf",
+      "download_gb": 13.4,
+      "vram": "~17 GB with the guide in context",
+      "note": "for a 16 GB card and up, when the 9B's prose is not enough"
     }
   ]
 }

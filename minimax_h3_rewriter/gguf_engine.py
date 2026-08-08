@@ -21,7 +21,6 @@ import threading
 from . import chat_template
 from .constants import install_command, normalize_seed
 from .progress import NodeProgress
-from .prompt_template import build_messages
 
 log = logging.getLogger(__name__)
 
@@ -189,17 +188,14 @@ def is_loaded() -> bool:
     return _STATE["llama"] is not None
 
 
-def _render(llama, prompt: str, resolution: str, duration: int) -> str:
+def _render(llama, messages: list[dict[str, str]]) -> str:
     metadata = dict(getattr(llama, "metadata", {}) or {})
-    messages = build_messages(prompt, resolution, duration)
     return chat_template.from_metadata(metadata, messages, enable_thinking=False)
 
 
 def generate(
     llama,
-    prompt: str,
-    resolution: str,
-    duration: int,
+    messages: list[dict[str, str]],
     seed: int,
     greedy: bool,
     max_new_tokens: int,
@@ -209,7 +205,7 @@ def generate(
     repetition_penalty: float,
     progress: NodeProgress | None = None,
 ) -> str:
-    rendered = _render(llama, prompt, resolution, duration)
+    rendered = _render(llama, messages)
 
     call_kwargs = {
         "max_tokens": int(max_new_tokens),

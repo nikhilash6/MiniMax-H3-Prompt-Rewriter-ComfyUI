@@ -15,7 +15,6 @@ import os
 import threading
 
 from .constants import normalize_seed
-from .prompt_template import build_messages
 from .progress import NodeProgress
 
 log = logging.getLogger(__name__)
@@ -278,8 +277,7 @@ def _input_device(model):
     return next(model.parameters()).device
 
 
-def _render_prompt(tokenizer, prompt: str, resolution: str, duration: int) -> str:
-    messages = build_messages(prompt, resolution, duration)
+def _render_prompt(tokenizer, messages: list[dict[str, str]]) -> str:
     try:
         return tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True, enable_thinking=False
@@ -318,9 +316,7 @@ def _was_interrupted() -> bool:
 def generate(
     tokenizer,
     model,
-    prompt: str,
-    resolution: str,
-    duration: int,
+    messages: list[dict[str, str]],
     seed: int,
     greedy: bool,
     max_new_tokens: int,
@@ -335,7 +331,7 @@ def generate(
     torch = _torch()
     set_seed(normalize_seed(seed))
 
-    rendered = _render_prompt(tokenizer, prompt, resolution, duration)
+    rendered = _render_prompt(tokenizer, messages)
     inputs = tokenizer(rendered, return_tensors="pt", add_special_tokens=False)
     device = _input_device(model)
     inputs = {name: tensor.to(device) for name, tensor in inputs.items()}

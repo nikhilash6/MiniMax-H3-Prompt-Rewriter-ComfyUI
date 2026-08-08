@@ -1,7 +1,7 @@
 [project]
 name = "minimax-h3-prompt-rewriter"
-version = "0.6.2"
-description = "ComfyUI nodes for the LightX2V MiniMax-H3 T2VA Prompt Rewriter LoRA: rewrite a short prompt into a structured MiniMax-H3 audio-video description, fully local."
+version = "0.7.0"
+description = "ComfyUI nodes that rewrite a short prompt into a structured MiniMax-H3 audio-video description, fully local: the LightX2V T2VA Prompt Rewriter LoRA on Qwen3.6-27B, or MiniMax's own writing guide on any small GGUF for T2VA, I2VA, FL2VA, L2VA and Ref2VA."
 readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"

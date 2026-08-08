@@ -31,6 +31,15 @@ OUTPUT_FIELDS = (
     "non_diegetic_music",
 )
 
+REF_OUTPUT_FIELDS = (
+    "subject_definitions",
+    "summary",
+    "retention_analysis",
+    "detailed_description",
+    "overall_soundscape",
+    "non_diegetic_music",
+)
+
 MODELS_SUBDIR = "LLM"
 
 #: transformers' set_seed feeds numpy, whose legacy seeding refuses anything at

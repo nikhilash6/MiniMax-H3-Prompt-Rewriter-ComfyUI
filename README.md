@@ -26,10 +26,24 @@ English, which is what MiniMax-H3 expects.
               MiniMax-H3 video + synchronized audio
 ```
 
+There are two ways to get that output, and the pack ships both:
+
+| | Rewriter node | Writer nodes |
+|---|---|---|
+| Where the format comes from | the LoRA — a 27B trained until H3 output came out of it unprompted | MiniMax's own writing guide, in the system prompt |
+| Model | Qwen3.6-27B only | any instruction-following GGUF |
+| Smallest working setup | ~10 GB download, ~13 GB VRAM | **2.6 GB download, ~5 GB VRAM** |
+| Tasks | T2VA | T2VA, I2VA, FL2VA, L2VA, Ref2VA |
+| Quality | the reference | close, and it runs on hardware the LoRA cannot touch |
+
+If your card has 8 GB, skip to [the writer nodes](#minimax-h3-prompt-writer-t2vai2vafl2val2va).
+
 ## What you need before installing
 
-This is a 27-billion-parameter language model, not a small helper. There is no
-way around the following, because the LoRA is bound to one specific base model.
+The LoRA route is a 27-billion-parameter language model, not a small helper.
+There is no way around the following, because the adapter is bound to one
+specific base model. **The writer nodes have none of these requirements** — see
+their table below.
 
 | Resource | Requirement |
 |---|---|
@@ -115,6 +129,115 @@ rewriter uses the decoding parameters the adapter was published with.
 | `use_lora` | on | Turn off for the plain Qwen3.6-27B baseline |
 | `auto_download` | on | Turn off to fail loudly instead of fetching 52 GB |
 
+The same options node feeds the writer nodes; `adapter` and `use_lora` simply do
+not apply there.
+
+### MiniMax-H3 Prompt Writer (T2VA/I2VA/FL2VA/L2VA)
+
+The same three output fields, without the LoRA and without the 27B. MiniMax's own
+[prompt-writing guide](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_base_en.md)
+goes into the system prompt and any instruction-following GGUF writes to it. A
+5.2 GB Qwen3.5-9B fills all three fields, with correct camera vocabulary, speaker
+IDs and `<d>[English] …</d>` dialogue, in about 20 seconds.
+
+The trade is worth stating plainly. The LoRA **is** the format: a 27B was trained
+until H3 output came out of it with a seven-line system prompt. Here the format is
+carried by ~4 000 tokens of instructions the model has to follow, so expect the
+LoRA's prose to be denser and its formatting more reliable. Expect this to run at
+all on hardware the LoRA cannot touch.
+
+Outputs are identical to the rewriter node's — same names, same order — so the two
+are interchangeable in a saved workflow.
+
+Beyond the rewriter's inputs:
+
+- `task` — **T2VA**, **I2VA**, **FL2VA** or **L2VA**. Everything but T2VA also
+  emits the alignment instruction line H3 requires as the very first line, with
+  the duration already substituted to two decimals; only the final shot number is
+  left to the model.
+- `reference_material` — **this node reads text, not pixels.** For I2VA, FL2VA and
+  L2VA, describe what the reference frames show, by hand or from a captioner node
+  upstream. Without it the model invents a first frame that has nothing to do with
+  your image.
+
+`model` offers the `writers` section of the model list plus every GGUF already in
+your ComfyUI model folders, whatever its architecture. Nothing here has to be
+Qwen3.6-27B, and nothing has to be installed: without `llama-cpp-python` the node
+runs the official llama.cpp binaries, exactly as the GGUF route below does.
+
+| Suggested writer | Download | VRAM with the guide in context |
+|---|---|---|
+| Qwen3.5-4B `Q4_K_M` | 2.6 GB | ~5 GB — start here on an 8 GB card |
+| Qwen3.5-9B `Q4_K_M` | 5.3 GB | ~8 GB — best writing per gigabyte |
+| Qwen3.5-9B Uncensored (HauhauCS) `Q4_K_M` | 5.2 GB | ~8 GB — does not decline scenes the stock model refuses |
+| Gemma 3 12B Instruct `Q4_K_M` | 6.8 GB | ~10 GB — non-Qwen alternative |
+| Mistral Small 3.2 24B Instruct `Q4_K_M` | 13.4 GB | ~17 GB — for 16 GB cards and up |
+
+`n_ctx` is raised automatically: the base guide needs about 9 200 tokens of
+context and the full-reference guide about 12 300, against the 8 192 default that
+suits the LoRA's short system prompt. Letting llama.cpp truncate instead would
+drop the *front* of the prompt — the guide and the output contract — and the
+answer would come back in some other format with nothing to say why.
+
+If a field comes back missing, the node still returns everything it got and says
+which fields are absent, on the node. Lower the temperature or move up a size.
+
+### MiniMax-H3 Prompt Writer (Ref2VA)
+
+Full-reference mode, from MiniMax's
+[full-reference guide](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md).
+Six sections instead of three, each its own output:
+
+| Output | Contents |
+|---|---|
+| `subject_definitions` | what each `<Subject N>` / `<Picture N>` / `<Video N>` / `<Audio N>` label denotes |
+| `summary` | the `[task type]` prefix and the reference relationships in one paragraph |
+| `retention_analysis` | per label: `fully_preserved`, `partially_preserved`, `attribute_transfer`, `weak_reference`, `fully_copy`, … |
+| `detailed_description` | the body, shot by shot, with labels cited where their roles apply |
+| `overall_soundscape` | ambience and physical sound |
+| `non_diegetic_music` | audience-only score |
+
+`reference_assets` is **required** and is refused when empty: full-reference mode
+describes how a target video reuses assets, so with no assets it is simply T2VA
+under another name. One per line —
+
+```text
+Picture 1: young woman, long dark hair, blue cardigan, thin silver necklace
+Picture 2: corner cafe interior, brick wall, brass lamps, rain on the window
+Audio 1: voice-timbre reference for the woman — low, unhurried, slight rasp
+```
+
+— and the model binds the labels, picks the task type, and writes the retention
+analysis from them.
+
+### MiniMax-H3 Guide Prompt (any LLM)
+
+Builds the guide-based `system_prompt` and `user_prompt` and returns them as
+strings, without running anything. Costs no VRAM and no time. Wire them into
+whichever LLM node you already use — local, API, remote — when you would rather
+not run the model here. It covers all five tasks, Ref2VA included.
+
+### The guides are fetched, not bundled
+
+The two guides are not shipped inside this pack. They are MiniMax's
+Documentation, and the MiniMax H3 Community License grants the right to
+redistribute the Materials only within its "Applicable Territory" — worldwide
+*excluding* the European Union, the United Kingdom, the Republic of Korea and the
+United States — and only alongside a copy of the agreement and a NOTICE file. A
+node pack on a registry cannot honour a territory boundary, so each installation
+fetches its own copy directly from MiniMax on first use: 16 KB and 24 KB, once,
+under the same `auto_download` switch as everything else.
+
+They land in
+
+```text
+ComfyUI/user/minimax_h3_rewriter/guides/
+```
+
+which the **Open guide folder** button opens. Editing a copy changes the system
+prompt, and a fetch never overwrites a file that is already there — trimming the
+guide is the cheapest way to fit a small model's context.
+
 ### The model list
 
 The **Open model list** button on the rewriter node opens
@@ -127,12 +250,29 @@ in your desktop's JSON editor — on the machine running ComfyUI, which is not
 necessarily the one looking at the browser tab. It is seeded from the packaged
 copy on first use, so updating the node pack never overwrites your edits.
 
+It holds two lists with identical fields. **`models`** feeds the LoRA rewriter and
+has to be Qwen3.6-27B:
+
 ```json
 {
   "name": "Qwen3.6-27B FP8",
   "repo": "Qwen/Qwen3.6-27B-FP8",
   "download_gb": 28.8,
   "vram": "~29 GB, no extra package needed"
+}
+```
+
+**`writers`** feeds the writer nodes and can be anything, as long as it is a GGUF
+language model with a chat template:
+
+```json
+{
+  "name": "Qwen3.5-4B",
+  "repo": "unsloth/Qwen3.5-4B-GGUF",
+  "file": "Qwen3.5-4B-Q4_K_M.gguf",
+  "format": "gguf",
+  "download_gb": 2.6,
+  "vram": "~5 GB with the guide in context"
 }
 ```
 
@@ -146,7 +286,13 @@ by name instead of silently picking something else.
 ```text
 ComfyUI/models/LLM/
 ├── Qwen3.6-27B/                          # base model, ~52 GB
-└── MiniMax-H3-Prompt-Rewriter-LoRA/      # adapter, ~3.5 GB
+├── MiniMax-H3-Prompt-Rewriter-LoRA/      # adapter, ~3.5 GB
+└── Qwen3.5-9B-Q4_K_M.gguf                # a writer model, one file
+
+ComfyUI/user/minimax_h3_rewriter/
+├── models.json                           # your model list
+├── guides/                               # the two writing guides, 40 KB
+└── runtime/                              # llama.cpp binaries, if fetched
 ```
 
 **Already downloaded the LoRA?** Point the `adapter` widget at that folder
@@ -306,9 +452,12 @@ the CUDA figure.
 > adapter needs 64 of 5120. llama.cpp refuses to attach the LoRA
 > (`tensor 'blk.0.attn_gate.weight' has incorrect shape`) and the run fails.
 > The node checks those two header numbers first and says so before anything is
-> downloaded. If you see a 9B producing a plausible-looking rewrite, it is
-> running **without** the adapter: the format comes from the system prompt, not
-> from the LoRA.
+> downloaded, and labels such files `(wrong size for the adapter)` in the
+> dropdown. If you see a 9B producing a plausible-looking rewrite, it is running
+> **without** the adapter: the format comes from the system prompt, not from the
+> LoRA. That is not a dead end — it is precisely what the
+> [writer nodes](#minimax-h3-prompt-writer-t2vai2vafl2val2va) do on purpose, with
+> the full guide in the prompt instead of seven lines.
 
 The GGUF route uses a **converted** adapter, not the PEFT one. Point the options
 node's `adapter` at a local `.gguf`, or set `adapters.gguf.repo` in the model
@@ -345,6 +494,14 @@ so nothing breaks when the ComfyUI frontend updates.
   seed produce the same rewrite, and ComfyUI caches the node accordingly.
 - **Interruption.** Cancelling a run stops both a download and a generation in
   progress; a partial download resumes on the next run.
+- **Format on the writer nodes is followed, not guaranteed.** A general model is
+  obeying instructions rather than reproducing a distribution it was trained on.
+  Keep `greedy` on — small models drift out of the format as soon as they sample —
+  and if a field is missing the node returns everything it did get and names the
+  gap on the node rather than failing.
+- **A chat template that rejects a system role still works.** Gemma's calls
+  `raise_exception` on one; the guide is then folded into the first user turn, as
+  those models' own cards prescribe.
 - The rewrite may add details a short prompt never stated. Review it before
   generating when identity, dialogue, timing or composition must be exact.
 
@@ -361,6 +518,7 @@ maintained.
 | LoRA adapter | [lightx2v/MiniMax-H3-Prompt-Rewriter-LoRA](https://huggingface.co/lightx2v/MiniMax-H3-Prompt-Rewriter-LoRA) |
 | Base language model | [Qwen/Qwen3.6-27B](https://huggingface.co/Qwen/Qwen3.6-27B) |
 | Video/audio generator | [MiniMaxAI/MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) |
+| Prompt-writing guides | [MiniMaxAI/MiniMax-H3 `docs/`](https://huggingface.co/MiniMaxAI/MiniMax-H3/tree/main/docs) — fetched at run time, see above |
 | Inference framework | [ModelTC/LightX2V](https://github.com/ModelTC/LightX2V) |
 
 The prompt template in `minimax_h3_rewriter/prompt_template.py` is reproduced
