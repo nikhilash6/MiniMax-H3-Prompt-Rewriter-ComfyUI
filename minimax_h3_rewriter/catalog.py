@@ -114,13 +114,38 @@ def user_file() -> str:
     return path
 
 
-def _read(path: str) -> dict:
+_PROBLEM = ""
+
+
+def problem() -> str:
+    """What is wrong with the live list, in one line, or ``""``.
+
+    A ``models.json`` with a typo in it used to fail in the quietest way there
+    is: the parse threw, the packaged seed was returned instead, and the
+    dropdown went back to its defaults with the user's own entries simply not
+    there. One line in the log, on a console nobody was reading, under a node
+    that looked fine. So the message comes back out here and goes into the
+    dropdown itself -- the one place somebody editing that file is looking.
+    """
+    return _PROBLEM
+
+
+def _read_reporting(path: str) -> tuple[dict, str]:
+    """Parse a list file. Returns ``(data, what went wrong)``."""
     try:
         with open(path, "r", encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, ValueError) as error:
-        log.warning("[minimax_h3_rewriter.catalog] %s is unreadable (%s)", path, error)
-        return {}
+            return json.load(handle), ""
+    except ValueError as error:
+        log.error("[minimax_h3_rewriter.catalog] %s is not valid JSON: %s", path, error)
+        return {}, f"{FILE_NAME} is not valid JSON — {error}"
+    except OSError as error:
+        log.error("[minimax_h3_rewriter.catalog] %s could not be read: %s", path, error)
+        return {}, f"{FILE_NAME} could not be read — {error}"
+
+
+def _read(path: str) -> dict:
+    data, _trouble = _read_reporting(path)
+    return data
 
 
 def _names(entries) -> list[str]:
@@ -214,7 +239,8 @@ def _data() -> dict:
         if cached is not None:
             return cached
 
-    live = _read(path)
+    global _PROBLEM
+    live, _PROBLEM = _read_reporting(path)
     seed = _read(SEED_FILE)
     if not live:
         return seed
@@ -248,7 +274,13 @@ def _data() -> dict:
 def _entries(data: dict, key: str) -> list[CatalogEntry]:
     entries = []
     for raw in data.get(key, []):
-        if not isinstance(raw, dict) or not raw.get("repo") or not raw.get("name"):
+        if not isinstance(raw, dict) or not raw.get("name"):
+            continue
+        if not raw.get("repo") and not raw.get("file"):
+            log.warning(
+                "[minimax_h3_rewriter.catalog] '%s' has neither 'repo' nor 'file', skipping",
+                raw.get("name"),
+            )
             continue
         fmt = str(raw.get("format") or FORMAT_TRANSFORMERS).lower()
         if fmt not in FORMATS:
@@ -258,7 +290,7 @@ def _entries(data: dict, key: str) -> list[CatalogEntry]:
             entries.append(
                 CatalogEntry(
                     name=str(raw["name"]),
-                    repo=str(raw["repo"]),
+                    repo=str(raw.get("repo") or ""),
                     fmt=fmt,
                     file=str(raw.get("file") or ""),
                     mmproj=str(raw.get("mmproj") or ""),

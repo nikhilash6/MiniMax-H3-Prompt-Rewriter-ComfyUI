@@ -415,10 +415,55 @@ conversion:
 }
 ```
 
-`repo` may equally be an absolute path to a folder you already have. Add an entry,
-refresh the browser, and it is in the dropdown. Keep `name` stable — saved
-workflows remember the label, and a node whose stored choice has vanished says so
-by name instead of silently picking something else.
+#### Pointing an entry at a file you already have
+
+`repo` need not be a Hugging Face id. Give it a **folder on this machine** and the
+file is read straight out of it, with nothing downloaded and nothing copied:
+
+```json
+{
+  "name": "Gemma 4 26B",
+  "repo": "X:/models/gemma-4-26B-A4B-it-UD-Q8_K_XL",
+  "file": "gemma-4-26B.gguf",
+  "format": "gguf"
+}
+```
+
+Or put the whole path in `file` and leave `repo` out — both forms work, in all
+three sections, because both are what people actually type. Two things to watch:
+
+- **Backslashes must be doubled in JSON**, or written as forward slashes.
+  `"X:\Programs\..."` is not valid JSON at all — `\P` is not an escape — and one
+  bad character makes the *whole file* unreadable, not just that entry. Windows
+  accepts `X:/Programs/...` everywhere, so that is the easier habit.
+- A path that does not exist is **reported, not downloaded around**. The node
+  names the file it could not find and stops.
+
+For a whole folder of GGUFs you keep elsewhere, an entry each is the long way
+round: point ComfyUI's `extra_model_paths.yaml` at it under the key `LLM` and
+every file in it is offered automatically, with `on disk:` in front of the name.
+
+Add an entry, **refresh the browser tab** — ComfyUI need not restart — and it is
+in the dropdown. Keep `name` stable: saved workflows remember the label, and a
+node whose stored choice has vanished says so by name instead of silently picking
+something else.
+
+#### When the list itself is broken
+
+A syntax error in `models.json` used to be the quietest failure in the pack: the
+parse threw, the packaged defaults were served instead, and the dropdown looked
+ordinary. An edit that never took was indistinguishable from an edit that did
+nothing.
+
+Now the first entry in every model dropdown says so, with the line and column:
+
+```text
+!! models.json is not valid JSON — Invalid \escape: line 3 column 30 (char 46) — showing the packaged list instead
+```
+
+The rest of the list is still there and ComfyUI still runs; picking that first
+entry and hitting Run repeats the message and names the file to fix. Fix it,
+refresh the tab, and it goes away.
 
 #### Updates add new entries without touching yours
 

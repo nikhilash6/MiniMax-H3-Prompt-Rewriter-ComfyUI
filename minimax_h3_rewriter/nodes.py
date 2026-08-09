@@ -41,7 +41,13 @@ from .constants import (
     RUNTIME_WHEEL,
 )
 from .fields import missing, split_fields, split_sections
-from .paths import adapter_is_complete, base_model_is_complete, models_root, resolve_source
+from .paths import (
+    adapter_is_complete,
+    base_model_is_complete,
+    catalog_file,
+    models_root,
+    resolve_source,
+)
 from .progress import NodeProgress, TransferReporter
 from .prompt_template import build_messages
 
@@ -121,12 +127,37 @@ def _build_model_map() -> dict[str, Choice]:
     return mapping
 
 
+PROBLEM_PREFIX = "!! "
+
+
+def _announce(choices: list[str]) -> list[str]:
+    """Put a broken model list at the top of the dropdown, where it is unmissable.
+
+    First, so it becomes the default on a new node and cannot be scrolled past.
+    The entries below it are the packaged defaults, which is exactly the state
+    that used to be indistinguishable from "my edit did nothing".
+    """
+    trouble = catalog.problem()
+    if not trouble:
+        return choices
+    return [f"{PROBLEM_PREFIX}{trouble} — showing the packaged list instead"] + choices
+
+
+def _refuse_problem(choice: str) -> None:
+    if choice.startswith(PROBLEM_PREFIX):
+        raise RuntimeError(
+            f"{choice[len(PROBLEM_PREFIX):]}\n\nFix {catalog.user_file()} — the 'Open model "
+            f"list' button opens it — then refresh the browser tab. ComfyUI need not restart."
+        )
+
+
 def model_choices() -> list[str]:
     choices = list(_build_model_map())
-    return choices or [BASE_MODEL_REPO]
+    return _announce(choices or [BASE_MODEL_REPO])
 
 
 def _resolve_model_choice(choice: str) -> Choice:
+    _refuse_problem(choice)
     found = _MODEL_MAP.get(choice)
     if found is None:
         found = _build_model_map().get(choice)
@@ -172,10 +203,11 @@ def _build_writer_map() -> dict[str, Choice]:
 
 def writer_choices() -> list[str]:
     choices = list(_build_writer_map())
-    return choices or ["(no GGUF model found — see the model list)"]
+    return _announce(choices or ["(no GGUF model found — see the model list)"])
 
 
 def _resolve_writer_choice(choice: str) -> Choice:
+    _refuse_problem(choice)
     found = _WRITER_MAP.get(choice)
     if found is None:
         found = _build_writer_map().get(choice)
@@ -233,10 +265,11 @@ def _build_captioner_map() -> dict[str, CaptionerChoice]:
 
 def captioner_choices() -> list[str]:
     choices = list(_build_captioner_map())
-    return choices or ["(no multimodal model found — see the model list)"]
+    return _announce(choices or ["(no multimodal model found — see the model list)"])
 
 
 def _resolve_captioner_choice(choice: str) -> CaptionerChoice:
+    _refuse_problem(choice)
     found = _CAPTIONER_MAP.get(choice)
     if found is None:
         found = _build_captioner_map().get(choice)
@@ -314,6 +347,20 @@ def _ensure_file(repo_id: str, filename: str, label: str, auto_download: bool, p
     if not filename:
         raise RuntimeError(f"{label}: no file name given for repository '{repo_id}'.")
 
+    on_disk = catalog_file(repo_id, filename)
+    if on_disk:
+        if os.path.isfile(on_disk):
+            return on_disk
+        raise RuntimeError(
+            f"{label}: '{on_disk}' does not exist. The entry points at a folder on this "
+            f"machine, so nothing is downloaded — check the path and the file name."
+        )
+    if os.path.isabs(repo_id):
+        raise RuntimeError(
+            f"{label}: '{repo_id}' is not a folder on this machine. Give an existing folder "
+            f"with '{filename}' inside it, or a Hugging Face repository id."
+        )
+
     destination = os.path.join(models_root(), filename)
     if os.path.isfile(destination) and os.path.getsize(destination) > 0:
         return destination
@@ -338,6 +385,17 @@ def _ensure_pair(
     the pair stays obvious to the local scan: one projector beside one model
     needs no name matching at all.
     """
+    on_disk = tuple(catalog_file(repo_id, name) for name in (file, mmproj))
+    if all(on_disk):
+        missing = [path for path in on_disk if not os.path.isfile(path)]
+        if missing:
+            raise RuntimeError(
+                f"{label}: {', '.join(repr(path) for path in missing)} does not exist. The entry "
+                f"points at a folder on this machine, so nothing is downloaded — check the path "
+                f"and the file names."
+            )
+        return on_disk[0], on_disk[1]
+
     directory = os.path.join(models_root(), repo_id.rstrip("/").split("/")[-1])
     targets = tuple(os.path.join(directory, name) for name in (file, mmproj))
 
@@ -346,6 +404,11 @@ def _ensure_pair(
 
     if complete():
         return targets
+    if os.path.isabs(repo_id):
+        raise RuntimeError(
+            f"{label}: '{repo_id}' is not a folder on this machine. Give an existing folder "
+            f"holding both '{file}' and '{mmproj}', or a Hugging Face repository id."
+        )
     if not auto_download:
         raise RuntimeError(
             f"{label} is missing from '{directory}' and auto_download is off. Enable it, or "

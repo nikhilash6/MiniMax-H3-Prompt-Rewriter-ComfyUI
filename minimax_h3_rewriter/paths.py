@@ -44,6 +44,29 @@ def looks_like_repo_id(value: str) -> bool:
     return "/" in value and not os.path.isabs(value) and "\\" not in value
 
 
+def catalog_file(repo: str, name: str) -> str:
+    """Where one file of a catalog entry sits on disk, or ``""`` if it is on the Hub.
+
+    A ``models.json`` entry names either a Hugging Face repository or something
+    already on this machine, and there are two natural ways to write the second:
+    ``repo`` as the folder with ``file`` a name inside it, or ``file`` as the
+    whole path with ``repo`` left out. Both are accepted, because both are what
+    people actually type -- and the alternative is a file that is right there on
+    the disk and cannot be named.
+
+    The answer is a path, not a promise: the caller still has to check it exists.
+    """
+    name = (name or "").strip()
+    repo = (repo or "").strip()
+    if not name:
+        return ""
+    if os.path.isabs(name):
+        return os.path.normpath(name)
+    if repo and os.path.isdir(repo):
+        return os.path.normpath(os.path.join(repo, name))
+    return ""
+
+
 def resolve_source(value: str, default_repo: str) -> tuple[str, str]:
     """Map a user-entered model reference to ``(repo_id, local_dir)``.
 
