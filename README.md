@@ -123,7 +123,7 @@ releases the VRAM again.
 Everything you rarely touch, kept off the main node. Leave it unconnected and the
 rewriter uses the decoding parameters the adapter was published with.
 
-![The Rewriter Options node, one output socket and fourteen widgets: max_new_tokens, temperature, top_p, top_k, repetition_penalty, attn_implementation, the adapter repository, use_lora, auto_download, gpu_layers, n_ctx, gguf_runtime, device and llama_backend](docs/node_options.png)
+![The Rewriter Options node, one output socket and fifteen widgets: max_new_tokens, temperature, top_p, top_k, repetition_penalty, attn_implementation, the adapter repository, use_lora, auto_download, gpu_layers, n_ctx, gguf_runtime, device, llama_backend and trust_remote_code](docs/node_options.png)
 
 | Input | Default | Purpose |
 |---|---|---|
@@ -131,13 +131,49 @@ rewriter uses the decoding parameters the adapter was published with.
 | `temperature` / `top_p` / `top_k` | 0.7 / 0.8 / 20 | Sampling, used only when `greedy` is off |
 | `repetition_penalty` | 1.05 | |
 | `attn_implementation` | `sdpa` | `eager` or `flash_attention_2` if you have it |
-| `adapter` | the LightX2V repo | Repository id or local folder of the LoRA |
+| `adapter` | the LightX2V repo | Repository id or local folder of the LoRA — see below |
 | `use_lora` | on | Turn off for the plain Qwen3.6-27B baseline |
 | `auto_download` | on | Turn off to fail loudly instead of fetching 52 GB |
 | `device` | `auto` | Which GPU runs the language model — see below |
+| `trust_remote_code` | **off** | Allow a checkpoint to run the Python it ships with — see below |
 
 The same options node feeds the writer nodes and the captioner; `adapter` and
 `use_lora` simply do not apply there.
+
+#### `adapter` — the one field a workflow can still choose
+
+Every model on these nodes is picked from a dropdown, so what a saved workflow
+carries is the *name* of an entry and never a path: paths live in your
+`models.json`, which stays on your machine. `adapter` is the exception — it is a
+text field, because pointing it at a `.gguf` LoRA you converted yourself is a
+thing people do. That means a workflow you downloaded gets to fill it in.
+
+Two consequences, both handled and neither of them a restriction on you:
+
+- **A network path is refused.** `\\host\share\...` and `//host/share/...` are
+  rejected before anything reads them, because merely looking at one is an
+  authentication attempt against whatever host is named. A share of your own is
+  reachable by drive letter or mount point as usual, and a path in `models.json`
+  is not restricted at all — that file is yours and does not travel.
+- **The adapter that was applied is logged**, every run. Ask for one that is not
+  the configured adapter and the console says so at warning level. A swapped
+  LoRA is otherwise invisible: the node still runs and still fills every field,
+  it just writes something else.
+
+#### `trust_remote_code` — off, and why
+
+A Transformers checkpoint can carry its own modelling code, named by `auto_map`
+in its `config.json`, and loading such a model imports and runs that Python with
+your user's rights. Nothing in the shipped list does this: every `transformers`
+entry is a Qwen3.6-27B variant, an architecture Transformers supports natively,
+and the GGUF entries never reach Transformers at all. So this switch is off, and
+for the models this node offers it changes nothing.
+
+It exists for the case where it does matter — a model you added to `models.json`
+yourself, with an architecture Transformers does not know. Then the node stops
+and says so instead of running the code, and turning the switch on is you saying
+which model you trust. The decision is yours to make and not `config.json`'s to
+make for you, which is the whole point of it being a widget.
 
 #### `device` — and why it changes `keep_model_loaded`
 

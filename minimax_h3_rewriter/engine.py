@@ -50,6 +50,12 @@ def _empty_cache() -> None:
 
 
 def _needs_remote_code(directory: str) -> bool:
+    """Whether loading this checkpoint would execute Python that ships with it.
+
+    ``auto_map`` in ``config.json`` names modelling code inside the checkpoint,
+    which Transformers imports and runs. Detecting it is not permission to run
+    it: the answer only decides whether the caller has to have said yes.
+    """
     config = os.path.join(directory, "config.json")
     if not os.path.isfile(config):
         return False
@@ -172,15 +178,27 @@ def load(
     attn_implementation: str,
     device: str = devices.AUTO,
     progress: NodeProgress | None = None,
+    trust_remote_code: bool = False,
 ):
     """Return ``(tokenizer, model)``, reusing the cached pair when unchanged."""
     device = devices.validate(device)
+
+    remote_code = _needs_remote_code(base_dir)
+    if remote_code and not trust_remote_code:
+        raise RuntimeError(
+            f"'{base_dir}' carries its own model code (its config.json has 'auto_map'), and "
+            f"loading it runs that code on this machine with your user's rights.\n\n"
+            f"If this is a model you chose and trust, turn 'trust_remote_code' on in the "
+            f"options node. Leave it off for anything a workflow picked for you."
+        )
+
     key = (
         os.path.normcase(base_dir),
         os.path.normcase(adapter_dir or ""),
         quantization,
         attn_implementation,
         device,
+        remote_code,
     )
 
     with _LOCK:
@@ -196,7 +214,6 @@ def load(
             progress.set_total(1000)
             progress.ratio(0.0, "Loading tokenizer")
 
-        remote_code = _needs_remote_code(base_dir)
         tokenizer = AutoTokenizer.from_pretrained(base_dir, trust_remote_code=remote_code)
         if tokenizer.pad_token_id is None:
             tokenizer.pad_token = tokenizer.eos_token
@@ -411,6 +428,7 @@ def rewrite(
     keep_loaded: bool,
     device: str = devices.AUTO,
     progress: NodeProgress | None = None,
+    trust_remote_code: bool = False,
     **generation,
 ) -> str:
     """Load (or reuse) the rewriter, generate once, and optionally release VRAM.
@@ -419,7 +437,8 @@ def rewrite(
     drop the last reference and free the device memory.
     """
     tokenizer, model = load(
-        base_dir, adapter_dir, quantization, attn_implementation, device, progress
+        base_dir, adapter_dir, quantization, attn_implementation, device, progress,
+        trust_remote_code=trust_remote_code,
     )
     try:
         return generate(tokenizer, model, progress=progress, **generation)

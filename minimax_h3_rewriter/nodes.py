@@ -71,6 +71,7 @@ DEFAULT_OPTIONS = {
     "gguf_runtime": RUNTIME_AUTO,
     "llama_backend": "auto",
     "device": devices.AUTO,
+    "trust_remote_code": False,
 }
 
 BASE_SPEC = {
@@ -424,10 +425,74 @@ def _ensure_pair(
     return targets
 
 
+_EXTENDED_LOCAL = re.compile(r"^\\\\[?.]\\[A-Za-z]:")
+
+
+def _refuse_remote(value: str) -> None:
+    """Refuse a network location that arrived through a widget.
+
+    Paths in ``models.json`` are the user's own and may point wherever they
+    like, a NAS included; that file never leaves the machine unless somebody
+    sends it. This string is the other kind. It rides inside the workflow JSON,
+    so a graph downloaded from anywhere gets to choose it, and merely *looking*
+    at a UNC path is an authentication attempt against whatever host is named --
+    it happens on the ``isfile`` call, long before anything decides the adapter
+    is unusable. Nothing legitimate is lost: a share holding your models is
+    reachable through a drive letter or a mount point like any other folder.
+    """
+    text = (value or "").strip()
+    if os.name == "nt":
+        text = text.replace("/", "\\")
+    if not text.startswith("\\\\") or _EXTENDED_LOCAL.match(text):
+        return
+    raise RuntimeError(
+        f"'{value}' is a network path, and the options node will not follow one.\n\n"
+        f"This field travels inside the workflow, so a graph from elsewhere could point it "
+        f"at any host. Map the share to a drive letter and use that, or put the adapter in "
+        f"{catalog.user_file()} instead — paths in that file are yours and are not restricted."
+    )
+
+
+def _announce_adapter(fmt: str, value: str, path: str) -> None:
+    """Record which LoRA was applied, and say so louder when it is an unusual one.
+
+    A swapped adapter is invisible from the outside: the node still runs, still
+    fills every field, and just writes something other than what it was asked
+    for. So the resolved path goes into the log on every run, and a request for
+    anything but the configured adapter goes in at warning level -- the point is
+    not to forbid it, which would break the person converting their own LoRA,
+    but to leave a trace when it was not their idea.
+    """
+    log.info("[minimax_h3_rewriter._resolve_adapter] prompt-rewriter LoRA: %s", path)
+    if not value:
+        return
+
+    expected = {ADAPTER_REPO.casefold()}
+    try:
+        spec = catalog.adapter(fmt)
+        expected.update(part.casefold() for part in (spec.repo, spec.file) if part)
+    except Exception:
+        log.debug("[minimax_h3_rewriter._announce_adapter] catalog unreadable", exc_info=True)
+
+    if value.casefold() not in expected:
+        log.warning(
+            "[minimax_h3_rewriter._resolve_adapter] the options node asked for adapter '%s', "
+            "which is not the configured one (%s); it resolved to %s. If you did not set that "
+            "yourself, check the 'adapter' field of the workflow you loaded.",
+            value, ", ".join(sorted(expected)), path,
+        )
+
+
 def _resolve_adapter(fmt: str, setting: str, auto_download: bool, progress: NodeProgress) -> str:
     """Locate the adapter matching the base model's format."""
     value = (setting or "").strip()
+    _refuse_remote(value)
+    path = _locate_adapter(fmt, value, auto_download, progress)
+    _announce_adapter(fmt, value, path)
+    return path
 
+
+def _locate_adapter(fmt: str, value: str, auto_download: bool, progress: NodeProgress) -> str:
     if fmt == FORMAT_TRANSFORMERS:
         return _ensure_present(value or ADAPTER_REPO, ADAPTER_SPEC, auto_download, progress)
 
@@ -545,6 +610,18 @@ class MiniMaxH3RewriterOptions:
                             "llama.cpp build to fetch. 'auto' takes CUDA on Windows with a "
                             "supported NVIDIA card (511 MB, about twice as fast) and Vulkan "
                             "otherwise. Pick 'vulkan' to keep the download at 34 MB."
+                        ),
+                    },
+                ),
+                "trust_remote_code": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": (
+                            "Non-GGUF models only. Some checkpoints ship their own Python and "
+                            "Transformers runs it when the model loads. Off means such a model "
+                            "is refused rather than executed. Turn it on only for a model you "
+                            "picked and trust — not because a downloaded workflow asked for it."
                         ),
                     },
                 ),
@@ -701,6 +778,7 @@ class MiniMaxH3PromptRewriter:
                 model_path = _ensure_file(
                     choice.reference, choice.file, "Base model", settings["auto_download"], progress
                 )
+            log.info("[minimax_h3_rewriter.rewrite] base model: %s", model_path)
             adapter_path = None
             if settings["use_lora"]:
                 problem = discovery.gguf_problem(model_path)
@@ -745,6 +823,7 @@ class MiniMaxH3PromptRewriter:
         else:
             _verify_base_model(choice.reference, progress)
             base_dir = _ensure_present(choice.reference, BASE_SPEC, settings["auto_download"], progress)
+            log.info("[minimax_h3_rewriter.rewrite] base model: %s", base_dir)
             adapter_dir = None
             if settings["use_lora"]:
                 adapter_dir = _resolve_adapter(
@@ -758,6 +837,7 @@ class MiniMaxH3PromptRewriter:
                 keep_loaded=keep_model_loaded,
                 device=settings["device"],
                 progress=progress,
+                trust_remote_code=bool(settings.get("trust_remote_code", False)),
                 **decoding,
             )
 
