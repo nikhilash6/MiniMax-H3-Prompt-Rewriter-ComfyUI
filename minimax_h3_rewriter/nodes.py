@@ -639,6 +639,28 @@ class MiniMaxH3RewriterOptions:
         return (options,)
 
 
+BYPASS_TOOLTIP = (
+    "Hand 'prompt' straight to the output and run no model at all: nothing is "
+    "downloaded, nothing is loaded, no VRAM is touched. This is what ComfyUI's own "
+    "bypass (Ctrl+B) cannot do here - it only forwards a connected link, and every "
+    "input this node writes from is a widget, so bypassing the node the usual way "
+    "leaves the nodes downstream with nothing. The section outputs come back empty."
+)
+
+BYPASS_CAPTION_TOOLTIP = (
+    "Pass 'previous' through unchanged and run no model at all, which drops this "
+    "asset from the chain without unwiring it. Numbering stays correct: each node "
+    "numbers what it receives, so the assets after this one close the gap. 'caption' "
+    "comes back empty."
+)
+
+
+def _bypassed(unique_id, text: str, names: tuple[str, ...]) -> tuple[str, ...]:
+    """Hand the prompt back untouched, with one empty string per section output."""
+    NodeProgress(unique_id).finish("bypassed")
+    return ((text or "").strip(),) + ("",) * len(names)
+
+
 class MiniMaxH3PromptRewriter:
     """Rewrite a short prompt into a structured MiniMax-H3 T2VA description."""
 
@@ -728,6 +750,7 @@ class MiniMaxH3PromptRewriter:
             },
             "optional": {
                 "options": (OPTIONS_TYPE,),
+                "bypass": ("BOOLEAN", {"default": False, "tooltip": BYPASS_TOOLTIP}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -748,8 +771,12 @@ class MiniMaxH3PromptRewriter:
         seed,
         keep_model_loaded,
         options=None,
+        bypass=False,
         unique_id=None,
     ):
+        if bypass:
+            return _bypassed(unique_id, prompt, OUTPUT_FIELDS)
+
         if not (prompt or "").strip():
             raise ValueError("prompt must not be empty")
 
@@ -1064,6 +1091,7 @@ class MiniMaxH3GuidedWriter:
                     },
                 ),
                 "options": (OPTIONS_TYPE,),
+                "bypass": ("BOOLEAN", {"default": False, "tooltip": BYPASS_TOOLTIP}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -1085,8 +1113,12 @@ class MiniMaxH3GuidedWriter:
         keep_model_loaded,
         reference_material="",
         options=None,
+        bypass=False,
         unique_id=None,
     ):
+        if bypass:
+            return _bypassed(unique_id, prompt, OUTPUT_FIELDS)
+
         settings = dict(DEFAULT_OPTIONS)
         if options:
             settings.update(options)
@@ -1187,6 +1219,7 @@ class MiniMaxH3GuidedWriterRef:
             },
             "optional": {
                 "options": (OPTIONS_TYPE,),
+                "bypass": ("BOOLEAN", {"default": False, "tooltip": BYPASS_TOOLTIP}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -1207,8 +1240,12 @@ class MiniMaxH3GuidedWriterRef:
         seed,
         keep_model_loaded,
         options=None,
+        bypass=False,
         unique_id=None,
     ):
+        if bypass:
+            return _bypassed(unique_id, prompt, REF_OUTPUT_FIELDS)
+
         settings = dict(DEFAULT_OPTIONS)
         if options:
             settings.update(options)
@@ -1460,6 +1497,7 @@ class MiniMaxH3ReferenceCaption:
                     },
                 ),
                 "options": (OPTIONS_TYPE,),
+                "bypass": ("BOOLEAN", {"default": False, "tooltip": BYPASS_CAPTION_TOOLTIP}),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
@@ -1484,8 +1522,13 @@ class MiniMaxH3ReferenceCaption:
         max_frames=media.DEFAULT_MAX_FRAMES,
         context_size=mtmd_engine.CONTEXT_FROM_MODEL,
         options=None,
+        bypass=False,
         unique_id=None,
     ):
+        if bypass:
+            NodeProgress(unique_id).finish("bypassed")
+            return ((previous or "").strip(), "")
+
         settings = dict(DEFAULT_OPTIONS)
         if options:
             settings.update(options)

@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: The tag and pyproject.toml must agree
+        run: |
+          tagged="${GITHUB_REF_NAME#v}"
+          declared=$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          echo "tag $GITHUB_REF_NAME -> $tagged, pyproject.toml says $declared"
+          if [ "$tagged" != "$declared" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match version = \"$declared\" in pyproject.toml"
+            exit 1
+          fi
+          echo "VERSION=$tagged" >> "$GITHUB_ENV"
+
+      - name: The pack compiles and the nodes load
+        run: |
+          python -m compileall -q __init__.py minimax_h3_rewriter
+          pip install --quiet requests
+          python - <<'PY'
+          import json
+          import pathlib
+
+          from minimax_h3_rewriter.nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
+
+          assert NODE_CLASS_MAPPINGS, "NODE_CLASS_MAPPINGS is empty"
+          unnamed = sorted(set(NODE_CLASS_MAPPINGS) - set(NODE_DISPLAY_NAME_MAPPINGS))
+          assert not unnamed, f"no display name for {unnamed}"
+
+          catalog = json.loads(pathlib.Path("minimax_h3_rewriter/models.json").read_text("utf-8"))
+          for section in ("models", "writers", "captioners"):
+              assert catalog.get(section), f"models.json has no {section}"
+
+          print(f"{len(NODE_CLASS_MAPPINGS)} nodes:", ", ".join(sorted(NODE_CLASS_MAPPINGS)))
+          print("models.json:", ", ".join(f"{s} {len(catalog[s])}" for s in ("models", "writers", "captioners")))
+          PY
+
+      - name: Release notes out of the changelogs
+        run: |
+          section() { awk -v v="$VERSION" 'index($0, "## " v) == 1 {f=1; next} f && /^## / {exit} f {print}' "$1"; }
+          section CHANGELOG.md > /tmp/en.md
+          section CHANGELOG_RU.md > /tmp/ru.md
+          if [ ! -s /tmp/en.md ] || [ ! -s /tmp/ru.md ]; then
+            echo "::error::no section for $VERSION in CHANGELOG.md or CHANGELOG_RU.md"
+            exit 1
+          fi
+          { cat /tmp/en.md; echo; echo "---"; echo; cat /tmp/ru.md; } > /tmp/notes.md
+          cat /tmp/notes.md
+
+      - name: Pack the archive
+        run: |
+          name="MiniMax-H3-Prompt-Rewriter-ComfyUI"
+          mkdir -p dist
+          git archive --format=zip --prefix="$name/" -o "dist/$name-$VERSION.zip" "$GITHUB_REF_NAME"
+          unzip -l "dist/$name-$VERSION.zip"
+          echo "ARCHIVE=dist/$name-$VERSION.zip" >> "$GITHUB_ENV"
+          echo "PREFIX=$name" >> "$GITHUB_ENV"
+
+      - name: What is in the archive, and what is not
+        run: |
+          listed=$(unzip -Z1 "$ARCHIVE")
+          echo "$listed"
+          for bad in "uv\.exe" "\.venv/" "dev-junction" "comfyui-path\.txt" "\.mcp\.json" \
+                     "__pycache__" "\.github/" "\.gitignore" "\.gitattributes"; do
+            if echo "$listed" | grep -qE -- "$bad"; then
+              echo "::error::$ARCHIVE contains something matching $bad"
+              exit 1
+            fi
+          done
+          for needed in __init__.py minimax_h3_rewriter/nodes.py minimax_h3_rewriter/models.json \
+                        web/js/model_list_button.js pyproject.toml requirements.txt \
+                        README.md README_RU.md CHANGELOG.md CHANGELOG_RU.md LICENSE; do
+            echo "$listed" | grep -qxF "$PREFIX/$needed" || {
+              echo "::error::$needed is missing from $ARCHIVE"
+              exit 1
+            }
+          done
+          echo "checked: the nodes, the web extension and the model list are in, the local state is not"
+
+      - name: The model list in the archive still parses
+        run: |
+          unzip -p "$ARCHIVE" "$PREFIX/minimax_h3_rewriter/models.json" > /tmp/models.json
+          python -c "import json; json.load(open('/tmp/models.json', encoding='utf-8')); print('models.json parses')"
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "$ARCHIVE" \
+            --title "MiniMax-H3 Prompt Rewriter $VERSION" \
+            --notes-file /tmp/notes.md \
+            --verify-tag

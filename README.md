@@ -4,7 +4,7 @@ ComfyUI nodes for the [LightX2V MiniMax-H3 T2VA Prompt Rewriter LoRA](https://hu
 A short prompt goes in; a structured, production-ready audio-video description
 for [MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3) comes out — entirely locally.
 
-[Русская версия](README_RU.md)
+[Русская версия](README_RU.md) · [Changelog](CHANGELOG.md)
 
 ![The rewriter node in ComfyUI: a short prompt on the left, the structured shot-by-shot description, soundscape and music fields on the right](docs/node_preview.png)
 

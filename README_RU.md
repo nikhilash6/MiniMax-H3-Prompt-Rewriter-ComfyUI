@@ -4,7 +4,7 @@
 На входе короткий промпт — на выходе структурированное описание аудио-видео сцены
 для [MiniMax-H3](https://huggingface.co/MiniMaxAI/MiniMax-H3). Полностью локально.
 
-[English version](README.md)
+[English version](README.md) · [История изменений](CHANGELOG_RU.md)
 
 ![Нода ререйтера в ComfyUI: короткий промпт слева, справа — структурированное покадровое описание, звуковой ландшафт и музыка](docs/node_preview.png)
 
