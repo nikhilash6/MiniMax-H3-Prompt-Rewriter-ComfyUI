@@ -6,6 +6,58 @@ The version in `pyproject.toml`, the git tag and the release on GitHub always sa
 the same thing; the release workflow refuses a tag that disagrees with
 `pyproject.toml`, or one that neither changelog has a section for.
 
+## 0.10.0 - 2026-08-15
+
+### Added
+
+- **`MiniMax-H3 Multi Reference Caption`, a whole shot's references in one
+  node.** A chain of caption nodes is exact but it grows: five references are
+  five nodes, five wires and five chances to leave the wrong role on one of
+  them. This node has no `role` widget at all - the group an asset is plugged
+  into is its label. That is the guide's own vocabulary made structural: Ref2VA
+  defines exactly four reference labels and forbids inventing more, so
+  `subjects`, `pictures`, `videos` and `audios` cover the format completely, and
+  describing an image as audio stops being possible rather than merely
+  discouraged. Slots grow as they are filled, one spare always waiting, which is
+  `io.Autogrow` from ComfyUI's v3 node API.
+
+  The block comes out in the guide's order - subjects, pictures, videos, audio -
+  rather than in wiring order, and each label is still numbered within its own
+  category, continuing from whatever arrives on `previous`, so the node sits in
+  a chain with single caption nodes on either side. `model`, `length`, `seed`,
+  `max_frames`, `context_size` and `bypass` are shared by every asset in it.
+  `description` and `instruction` are not carried over: text written by hand
+  belongs to one asset at a time, and the single node still has them.
+
+- **A checkbox on each reference slot, on the slot's own row.** A caption costs
+  a model load and seconds to minutes, which makes "everything except this one"
+  the ordinary thing to want, and pulling the wire out to get it throws away the
+  wiring that was the point. A dropdown of names would have been the cheap
+  answer and the wrong one: the whole value is being able to hit the switch
+  belonging to the input you are looking at. ComfyUI will not lay a widget out
+  there - the frontend sorts every plain socket above every widget, whatever
+  order the schema asks for - so the box is drawn onto the node at the row's own
+  height and the click is picked up from the canvas. The state itself is an
+  ordinary hidden widget holding JSON, which is what makes it survive a save and
+  reach the backend through the API like any other value; only switched-off
+  slots are written down, so an untouched node stays empty in the saved
+  workflow. A frontend that never runs the script leaves the JSON field visible
+  and everything still works.
+
+- **A video slot takes a `VIDEO` or an `IMAGE` batch.** Video loaders disagree
+  about which they hand out - VideoHelperSuite's `Load Video (Upload)` gives
+  frames, not a `VIDEO` - and both are the same reference, so the slot accepts
+  either and the run sorts out which one arrived. Frames are sampled evenly up
+  to `max_frames` in both cases, so the cost of a clip stays independent of its
+  length.
+
+### Changed
+
+- **The pack no longer registers all or nothing.** The new node needs a recent
+  ComfyUI for its growing inputs, so it is registered on its own and an install
+  too old for the v3 node API loses that one node instead of every node in the
+  pack to a single failed import.
+
 ## 0.9.5 - 2026-08-14
 
 ### Added

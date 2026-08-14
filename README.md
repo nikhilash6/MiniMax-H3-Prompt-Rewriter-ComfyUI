@@ -38,7 +38,9 @@ There are two ways to get that output, and the pack ships both:
 
 Both read text. A third node, [Reference Caption](#minimax-h3-reference-caption),
 turns an image, an audio clip or a video into the text they need — 3 to 5 seconds
-per asset on a 3.4 GB model.
+per asset on a 3.4 GB model. When a whole shot's worth of references is waiting,
+[Multi Reference Caption](#minimax-h3-multi-reference-caption) does all of them at
+once.
 
 If your card has 8 GB, skip to [the writer nodes](#minimax-h3-prompt-writer-t2vai2vafl2val2va).
 
@@ -369,6 +371,60 @@ Other inputs:
 >
 > A model and its `mmproj` sitting together in one folder under `models/LLM` is
 > offered automatically, so you can try another without editing anything.
+
+### MiniMax-H3 Multi Reference Caption
+
+The same job for a whole shot, in one box. A chain is exact, but it grows: five
+references are five nodes, five wires and five chances to leave the wrong role on
+one of them. This node folds the chain into a single box and takes the role out
+of your hands entirely — **the group an asset is plugged into is its label.**
+
+That is the guide's vocabulary made structural. Ref2VA defines exactly four
+reference labels and forbids inventing more, so four groups of inputs cover the
+format completely, and describing an image as audio stops being *possible* rather
+than merely discouraged.
+
+| Group | Label | What belongs here |
+|---|---|---|
+| `subjects` | `<Subject N>` | reusable visible content — a person, an animal, a place, a costume, a style |
+| `pictures` | `<Picture N>` | an image serving as an actual frame: first, last, key, composition anchor, storyboard panel |
+| `videos` | `<Video N>` | whole-video relationships — an edit source, a continuation point, camera work and pacing |
+| `audios` | `<Audio N>` | a voice timbre, music, ambience, an effect |
+
+Slots grow as you fill them, one spare always waiting, so the node is as tall as
+the shot needs and no taller.
+
+![The Multi Reference Caption node beside a text viewer: seven reference slots each with a checkbox on its own row, the connected video_0 slot unchecked while subject_0 and audio_0 stay checked, and the viewer showing a block of exactly two lines, Subject 1 describing a turtle with gem-like stones on its shell and Audio 1 describing a male voice over birdsong and splashing water](docs/node_multi_ref_caption.png)
+
+*Two assets through Qwen2.5-Omni-3B — 6.0 s. The video is wired up and switched
+off, so the block came out as `Subject 1` and `Audio 1` with no `Video` line at
+all: the reference stays in the graph, it just costs nothing on this run.*
+
+**The checkbox on a slot's own row switches it off** without unplugging anything.
+A caption costs a model load and seconds to minutes, which makes "everything
+except this one" the ordinary thing to want, and pulling the wire out to get it
+throws away the wiring you meant to keep. The state is saved with the workflow
+and travels through the API like any other value.
+
+**A `videos` slot takes a `VIDEO` or an `IMAGE` batch**, whichever your loader
+hands out — VideoHelperSuite's `Load Video (Upload)` wires straight in. Frames
+are sampled evenly up to `max_frames` either way, so the cost of a clip stays
+independent of its length.
+
+**The block is written in the guide's order** — subjects, pictures, videos, audio
+— rather than in wiring order, and each label is numbered within its own
+category, continuing from whatever arrives on `previous`. So this node still sits
+in a chain with single caption nodes on either side.
+
+`model`, `length`, `seed`, `max_frames`, `context_size` and `bypass` are shared
+by every asset in the node. `role`, `description` and `instruction` are gone on
+purpose: the group is the role, and text you write yourself belongs to one asset
+at a time. Keep [Reference Caption](#minimax-h3-reference-caption) for an asset
+you want to describe by hand or ask a different question about.
+
+> **This node needs a recent ComfyUI.** Its growing inputs are `io.Autogrow` from
+> the v3 node API. On an older install it is the only node that goes missing —
+> the rest of the pack registers exactly as before.
 
 ### MiniMax-H3 Guide Prompt (any LLM)
 
