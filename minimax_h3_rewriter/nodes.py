@@ -11,6 +11,7 @@ import re
 from . import (
     catalog,
     cli_engine,
+    clip_caption,
     devices,
     discovery,
     download,
@@ -1260,6 +1261,34 @@ class MiniMaxH3GuidedWriterRef:
         return (text,) + tuple(sections[name] for name in REF_OUTPUT_FIELDS)
 
 
+GUIDE_PROMPT_FORMATS = ("plain", "chatml")
+
+
+def single_prompt(system: str, user: str, form: str = "plain") -> str:
+    """The two messages as one string, for an LLM node that takes only one.
+
+    ComfyUI's own ``TextGenerate`` has a single ``prompt`` input and wraps
+    whatever it receives in the model's chat template, which puts the guide
+    inside the user turn. ``plain`` accepts that and joins the two, which is what
+    a ``StringConcatenate`` in the middle of the graph would have done.
+
+    ``chatml`` writes the turns out instead: Qwen's tokenizer skips its own
+    template as soon as the text starts with ``<|im_start|>``, so the guide lands
+    in a real system turn. That branch also skips Qwen's thinking suppression, so
+    the empty think block is written here -- without it the model spends hundreds
+    of tokens reasoning before the rewrite, which is the same reason
+    ``chat_template`` renders with ``enable_thinking=False``.
+    """
+    system, user = (system or "").strip(), (user or "").strip()
+    if form == "chatml":
+        return (
+            f"<|im_start|>system\n{system}<|im_end|>\n"
+            f"<|im_start|>user\n{user}<|im_end|>\n"
+            f"<|im_start|>assistant\n<think>\n\n</think>\n\n"
+        )
+    return f"{system}\n\n{user}".strip()
+
+
 class MiniMaxH3GuidePrompt:
     """The guide-based system and user messages, for any other LLM node to run."""
 
@@ -1267,7 +1296,8 @@ class MiniMaxH3GuidePrompt:
         "Builds the system and user prompt from MiniMax's writing guide and returns them as "
         "strings, without running anything. Wire them into whatever LLM node you already use — "
         "local, API, or remote — when you would rather not run the model here. Costs no VRAM "
-        "and no time."
+        "and no time. The third output is both of them in one string, for a node that takes a "
+        "single prompt — ComfyUI's own 'Generate Text' among them."
     )
 
     @classmethod
@@ -1310,12 +1340,26 @@ class MiniMaxH3GuidePrompt:
                         ),
                     },
                 ),
+                "format": (
+                    list(GUIDE_PROMPT_FORMATS),
+                    {
+                        "default": "plain",
+                        "tooltip": (
+                            "How the third output joins the two. 'plain' puts a blank line "
+                            "between them and lets the LLM node apply the model's own chat "
+                            "template, which lands the guide in the user turn. 'chatml' writes "
+                            "the turns out instead, so a Qwen text encoder takes the guide as a "
+                            "real system message and skips its thinking block; on a model that "
+                            "is not ChatML, leave this on 'plain'."
+                        ),
+                    },
+                ),
             },
             "hidden": {"unique_id": "UNIQUE_ID"},
         }
 
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("system_prompt", "user_prompt")
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("system_prompt", "user_prompt", "prompt")
     FUNCTION = "build"
     CATEGORY = CATEGORY
 
@@ -1327,6 +1371,7 @@ class MiniMaxH3GuidePrompt:
         duration,
         reference_material="",
         auto_download=True,
+        format="plain",
         unique_id=None,
     ):
         progress = NodeProgress(unique_id)
@@ -1335,11 +1380,12 @@ class MiniMaxH3GuidePrompt:
             guide, task, prompt, resolution, int(duration), reference_material
         )
         system, user = messages[0]["content"], messages[1]["content"]
+        joined = single_prompt(system, user, format)
         progress.finish(
-            f"{task} · system {len(system)} chars · user {len(user)} chars\n"
+            f"{task} · system {len(system)} chars · user {len(user)} chars · {format}\n"
             f"about {guide_prompt.context_needed(messages, 0)} tokens of context before the answer"
         )
-        return (system, user)
+        return (system, user, joined)
 
 
 CAPTION_ROLES = ("Subject", "Picture", "Video", "Audio")
@@ -1426,7 +1472,8 @@ class MiniMaxH3ReferenceCaption:
                             "A multimodal GGUF and its projector. Entries prefixed 'on disk:' "
                             "are pairs already in your ComfyUI model folders. Not every "
                             "multimodal GGUF works: llama.cpp's mtmd has to understand the "
-                            "projector, and some current models abort while loading it."
+                            "projector, and some current models abort while loading it. Ignored "
+                            "entirely while 'clip' is connected."
                         ),
                     },
                 ),
@@ -1443,6 +1490,18 @@ class MiniMaxH3ReferenceCaption:
                 "image": ("IMAGE", {"tooltip": "A frame, or a batch of frames from a clip."}),
                 "audio": ("AUDIO",),
                 "video": ("VIDEO",),
+                "clip": (
+                    "CLIP",
+                    {
+                        "tooltip": (
+                            "A multimodal text encoder loaded by 'CLIPLoader' — Qwen3-VL or "
+                            "Gemma-4. Connect it and this asset is described by that model "
+                            "instead of by 'model', which stays loaded between runs rather than "
+                            "being read off disk each time. Only Gemma-4 E2B, E4B and 12B can "
+                            "hear audio. Leave it unconnected and nothing changes."
+                        ),
+                    },
+                ),
                 "previous": (
                     "STRING",
                     {
@@ -1516,6 +1575,7 @@ class MiniMaxH3ReferenceCaption:
         image=None,
         audio=None,
         video=None,
+        clip=None,
         previous="",
         description="",
         instruction="",
@@ -1541,52 +1601,73 @@ class MiniMaxH3ReferenceCaption:
                     f"{role}: nothing to describe. Connect an image, an audio clip or a video, "
                     f"or type the description into 'description'."
                 )
-            choice = _resolve_captioner_choice(model)
-            if choice.local:
-                model_path, mmproj_path = choice.reference, choice.mmproj
-            else:
-                model_path, mmproj_path = _ensure_pair(
-                    choice.reference, choice.file, choice.mmproj, "Captioner",
-                    settings["auto_download"], progress,
-                )
-
-            header = discovery.gguf_header(mmproj_path)
-            if audio is not None and not header["audio"]:
-                raise RuntimeError(
-                    f"'{os.path.basename(mmproj_path)}' was built without an audio encoder, so "
-                    f"this model cannot hear the clip. Pick a captioner whose label lists "
-                    f"'audio'."
-                )
-            if (image is not None or video is not None) and not header["vision"]:
-                raise RuntimeError(
-                    f"'{os.path.basename(mmproj_path)}' was built without a vision encoder, so "
-                    f"this model cannot see. Pick a captioner whose label lists 'vision'."
-                )
-
             asked = (instruction or "").strip() or CAPTION_INSTRUCTIONS[role]
             asked = f"{asked} {CAPTION_LENGTHS[length]}"
 
-            caption = mtmd_engine.describe(
-                model_path=model_path,
-                mmproj_path=mmproj_path,
-                instruction=asked,
-                image=image,
-                audio=audio,
-                video=video,
-                max_frames=int(max_frames),
-                gpu_layers=int(settings["gpu_layers"]),
-                n_ctx=int(context_size),
-                seed=int(seed),
-                greedy=True,
-                max_new_tokens=min(int(settings["max_new_tokens"]), 1024),
-                temperature=float(settings["temperature"]),
-                top_p=float(settings["top_p"]),
-                top_k=int(settings["top_k"]),
-                device=settings["device"],
-                backend=settings["llama_backend"],
-                auto_download=settings["auto_download"],
-                progress=progress,
-            )
+            if clip is not None:
+                kinds = set()
+                if image is not None:
+                    kinds.add("image")
+                if video is not None:
+                    kinds.add("video")
+                if audio is not None:
+                    kinds.add("audio")
+                clip_caption.check(clip, kinds)
+                caption = clip_caption.describe(
+                    clip,
+                    instruction=asked,
+                    image=image,
+                    audio=audio,
+                    video=video,
+                    max_frames=int(max_frames),
+                    seed=int(seed),
+                    settings=settings,
+                    progress=progress,
+                )
+            else:
+                choice = _resolve_captioner_choice(model)
+                if choice.local:
+                    model_path, mmproj_path = choice.reference, choice.mmproj
+                else:
+                    model_path, mmproj_path = _ensure_pair(
+                        choice.reference, choice.file, choice.mmproj, "Captioner",
+                        settings["auto_download"], progress,
+                    )
+
+                header = discovery.gguf_header(mmproj_path)
+                if audio is not None and not header["audio"]:
+                    raise RuntimeError(
+                        f"'{os.path.basename(mmproj_path)}' was built without an audio encoder, so "
+                        f"this model cannot hear the clip. Pick a captioner whose label lists "
+                        f"'audio'."
+                    )
+                if (image is not None or video is not None) and not header["vision"]:
+                    raise RuntimeError(
+                        f"'{os.path.basename(mmproj_path)}' was built without a vision encoder, so "
+                        f"this model cannot see. Pick a captioner whose label lists 'vision'."
+                    )
+
+                caption = mtmd_engine.describe(
+                    model_path=model_path,
+                    mmproj_path=mmproj_path,
+                    instruction=asked,
+                    image=image,
+                    audio=audio,
+                    video=video,
+                    max_frames=int(max_frames),
+                    gpu_layers=int(settings["gpu_layers"]),
+                    n_ctx=int(context_size),
+                    seed=int(seed),
+                    greedy=True,
+                    max_new_tokens=min(int(settings["max_new_tokens"]), 1024),
+                    temperature=float(settings["temperature"]),
+                    top_p=float(settings["top_p"]),
+                    top_k=int(settings["top_k"]),
+                    device=settings["device"],
+                    backend=settings["llama_backend"],
+                    auto_download=settings["auto_download"],
+                    progress=progress,
+                )
 
         caption = " ".join(caption.split())
         line = f"{role} {next_index(previous, role)}: {caption}"

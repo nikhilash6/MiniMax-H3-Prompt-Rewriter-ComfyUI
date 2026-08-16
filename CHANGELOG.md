@@ -6,6 +6,94 @@ The version in `pyproject.toml`, the git tag and the release on GitHub always sa
 the same thing; the release workflow refuses a tag that disagrees with
 `pyproject.toml`, or one that neither changelog has a section for.
 
+## 0.12.0 - 2026-08-16
+
+### Added
+
+- **A `clip` input on both caption nodes: describe with a model ComfyUI already
+  has loaded.** The GGUF route runs `llama-mtmd-cli`, one process per asset, so a
+  shot with five references reads the weights off disk five times. Connect a
+  multimodal text encoder from `CLIPLoader` instead and the same work happens
+  inside ComfyUI, on a model its own allocator is holding: read once, reused for
+  every asset, and reused again on the next run. Measured on Gemma-4 12B: three
+  assets - an image, a clip and its soundtrack - in 24 s, with one
+  `Requested to load` in the log covering all of them.
+
+  This settles the question of running `llama-mtmd-cli` in its chat mode to avoid
+  reloading. That would have meant driving an interactive process over stdin and
+  scraping its prompt out of stdout, against a runtime whose own rule is that a
+  child's stdin is closed. The encoder route gets the same saving with a
+  documented API and no subprocess at all, so the chat-mode idea is dropped.
+
+  Nothing is replaced. `model` stays exactly as it was and is simply not
+  consulted while `clip` is connected; leave the input empty and both nodes
+  behave as before, down to the wording of their errors.
+
+- **Encoder capability is checked before anything runs**, the same courtesy the
+  GGUF route pays with its projector header. What is looked for is the audio
+  *projector* rather than the audio *encoder*, and the difference is not
+  cosmetic: Gemma-4 E2B and E4B carry a real audio encoder, while the 12B is the
+  encoder-free "unified" build that projects audio frames straight into the
+  language model and has no encoder to find. Probing for one would have reported
+  a model deaf while it was listening perfectly well. Gemma-4 31B, which
+  genuinely cannot hear, is refused; so is Qwen3-VL.
+
+- **Reasoning is cut off the caption.** Asking a model not to think is not the
+  same as it not thinking: Gemma-4's decoder rewrites its thought channel into
+  `<think>`/`</think>`, and an fp8 E4B fills that channel with a page of analysis
+  even though the prompt primes it closed. A caption is one line of a reference
+  block, so everything up to the closing tag is dropped, and an unclosed block -
+  what a truncated answer leaves - goes with it.
+
+  Two related findings about Gemma-4 E2B/E4B, both reproduced with ComfyUI's own
+  `Generate Text` node on the same checkpoint and therefore not this pack's to
+  fix: it reasons out loud as above, and audio never reaches it - the caption
+  comes back saying no clip was provided. The node warns in the log when it sees
+  that shape of encoder rather than refusing, since another checkpoint may
+  behave. Gemma-4 12B takes audio correctly, which is what the measurement above
+  was made on.
+
+### Changed
+
+- **`media` decodes a VIDEO into an IMAGE batch as well as into PNGs.** Both
+  sinks share the sampling, the seek strategy and `max_frames`, so a clip
+  described through either route is described from exactly the same frames. The
+  frames reach the encoder as `image=` rather than `video=` on purpose:
+  Qwen3-VL's tokenizer has no video argument and would have ignored them in
+  silence, and Gemma-4's video path re-subsamples to 1 fps, which would have
+  quietly overruled `max_frames`.
+
+## 0.11.0 - 2026-08-15
+
+### Added
+
+- **A third output on `Guide Prompt (any LLM)`: both prompts in one string.**
+  Almost every LLM node takes a single prompt, so wiring this one up has always
+  meant a string-concatenate node in the middle. The pairing that prompted this
+  is ComfyUI's own `Generate Text`, new in 0.30: it runs a language model inside
+  ComfyUI's process, off a checkpoint loaded by `CLIPLoader`, which makes
+  `CLIPLoader` plus `Guide Prompt` plus `Generate Text` the shortest route to
+  this pack's output with nothing downloaded at all - if a Qwen3-VL or Gemma-4
+  text encoder is already on disk for an image model.
+
+  `Generate Text` needs three settings to cooperate, and the README now names
+  them: `max_length` well above its default of 512, which is an output budget
+  that six Ref2VA sections do not fit into; `thinking` off; and
+  `use_default_template` left alone.
+
+- **`format` on the same node, `plain` or `chatml`.** `plain` joins the two
+  prompts with a blank line and lets the LLM node apply the model's own chat
+  template, which puts the guide inside the user turn - correct everywhere, and
+  the default. `chatml` writes the turns out here instead: Qwen's tokenizer skips
+  its own template as soon as the text starts with `<|im_start|>`, so the guide
+  arrives as a real system message. That same branch skips Qwen's thinking
+  suppression, so the empty think block is written along with it, for the reason
+  the GGUF route renders templates with `enable_thinking=False`. It is
+  Qwen-shaped by construction and says so.
+
+  The new output is appended and the new widget is optional, so a saved workflow
+  keeps every value and every wire it had.
+
 ## 0.10.0 - 2026-08-15
 
 ### Added

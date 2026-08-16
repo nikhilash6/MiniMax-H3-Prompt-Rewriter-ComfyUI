@@ -222,6 +222,65 @@ def _save(frames, workspace: Workspace) -> list[str]:
     return paths
 
 
+def _stack(frames, workspace: Workspace):
+    """Turn frames into one ComfyUI IMAGE batch: ``(frames, height, width, 3)``, 0 to 1.
+
+    ``workspace`` is unused and kept so this can stand in for :func:`_save`.
+    """
+    import torch
+
+    numpy = _numpy()
+
+    batch = [
+        torch.from_numpy(frame.to_ndarray(format="rgb24").astype(numpy.float32) / 255.0)
+        for frame in frames
+    ]
+    return torch.stack(batch) if batch else None
+
+
+def _empty(result) -> bool:
+    """Whether a sink produced nothing, for a list of paths or a tensor alike."""
+    return result is None or len(result) == 0
+
+
+def _collect(video, workspace: Workspace, max_frames: int, sink):
+    """Decode the sampled frames of a VIDEO and hand them to ``sink``.
+
+    Both routes share this, so a clip is described from exactly the same frames
+    whether it goes to a subprocess as PNGs or to a resident model as a tensor.
+    The sink is given an iterator rather than a list, which is what lets the PNG
+    path avoid holding a whole batch at once.
+
+    Returns ``(whatever the sink returned, total frames, seconds)``.
+    """
+    import av
+
+    source = _video_source(video, workspace)
+    result = None
+
+    with av.open(source) as container:
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+        total = _frame_count(stream)
+        seconds = float(container.duration / av.time_base) if container.duration else 0.0
+        wanted = frame_indices(total, max_frames) if total else list(range(max(max_frames, 1)))
+
+        if total > SEEK_ABOVE_FRAMES and stream.duration:
+            try:
+                result = sink(_by_seeking(container, stream, wanted, total), workspace)
+            except Exception as error:
+                log.info(
+                    "[minimax_h3_rewriter.media._collect] seeking failed (%s), "
+                    "decoding in order instead", error,
+                )
+                container.seek(0)
+                result = None
+        if _empty(result):
+            result = sink(_in_order(container, stream, wanted), workspace)
+
+    return result, total, seconds
+
+
 def video_frames(
     video, workspace: Workspace, max_frames: int = DEFAULT_MAX_FRAMES
 ) -> tuple[list[str], int, float]:
@@ -241,31 +300,22 @@ def video_frames(
       the vision tower; a thirty-second clip is 750. ``max_frames`` exists so
       the cost of describing a clip does not depend on how long it is.
     """
-    import av
-
-    source = _video_source(video, workspace)
-    paths: list[str] = []
-
-    with av.open(source) as container:
-        stream = container.streams.video[0]
-        stream.thread_type = "AUTO"
-        total = _frame_count(stream)
-        seconds = float(container.duration / av.time_base) if container.duration else 0.0
-        wanted = frame_indices(total, max_frames) if total else list(range(max(max_frames, 1)))
-
-        if total > SEEK_ABOVE_FRAMES and stream.duration:
-            try:
-                paths = _save(_by_seeking(container, stream, wanted, total), workspace)
-            except Exception as error:
-                log.info(
-                    "[minimax_h3_rewriter.media.video_frames] seeking failed (%s), "
-                    "decoding in order instead", error,
-                )
-                container.seek(0)
-                paths = []
-        if not paths:
-            paths = _save(_in_order(container, stream, wanted), workspace)
-
-    if not paths:
+    paths, total, seconds = _collect(video, workspace, max_frames, _save)
+    if _empty(paths):
         raise RuntimeError("no frames could be decoded from the VIDEO input")
     return paths, max(total, len(paths)), seconds
+
+
+def video_tensor(video, workspace: Workspace, max_frames: int = DEFAULT_MAX_FRAMES):
+    """Sample a VIDEO input straight into an IMAGE batch. Returns ``(batch, total, seconds)``.
+
+    The same frames :func:`video_frames` would have written out, kept in memory
+    instead: the CLIP route hands tensors to a model that is already loaded, so
+    a round trip through PNG would be pure cost. Everything about *which* frames
+    are taken is shared, which is what makes a clip described through either
+    route describable from the same evidence.
+    """
+    batch, total, seconds = _collect(video, workspace, max_frames, _stack)
+    if _empty(batch):
+        raise RuntimeError("no frames could be decoded from the VIDEO input")
+    return batch, max(total, len(batch)), seconds

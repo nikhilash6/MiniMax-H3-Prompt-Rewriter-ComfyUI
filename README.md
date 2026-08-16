@@ -426,12 +426,101 @@ you want to describe by hand or ask a different question about.
 > the v3 node API. On an older install it is the only node that goes missing —
 > the rest of the pack registers exactly as before.
 
+### Captioning with a model ComfyUI already has loaded
+
+Both caption nodes have a `clip` input. Connect a multimodal text encoder from
+`CLIPLoader` and every asset is described by *that* model instead of by the GGUF
+in `model` — which then stays exactly where ComfyUI's allocator put it.
+
+That is the whole point. The GGUF route runs `llama-mtmd-cli`, one process per
+asset, so a shot with five references reads the weights off disk five times. A
+loaded encoder is read **once**, and reruns while you tune the wording cost
+nothing at all. Measured here: three assets — an image, a clip and its
+soundtrack — through Gemma-4 12B in **24 s**, with the log showing a single
+`Requested to load` for all of them.
+
+Do not read that as "faster", though. The same three assets through the 3.4 GB
+Qwen2.5-Omni-3B on the GGUF route took **16 s**, loads and all: a small model
+loads quickly enough that three reloads cost less than a 12B costs to run. What
+this route buys is a *bigger* model at no reload penalty, and reruns that skip
+the loading entirely — and the gap widens with every asset and every rerun.
+
+Which encoders qualify, and what each can take in:
+
+| Encoder | Sees | Hears |
+|---|---|---|
+| Qwen3-VL 4B / 8B | yes — a batch of frames is read frame by frame | no |
+| Gemma-4 12B | yes | **yes** — the "unified" build, audio projected straight in |
+| Gemma-4 E2B / E4B | yes | has the parts, but see below |
+| Gemma-4 31B | yes | no |
+
+Gemma-4 is recognised from the checkpoint itself, so the `type` widget on
+`CLIPLoader` does not matter for it. Connect a vision-only encoder with audio
+wired up and the node refuses before anything runs, the same way it refuses a
+projector without an audio tower.
+
+> **Two things to know about Gemma-4 E2B/E4B**, both observed on ComfyUI 0.30
+> with an fp8 E4B and both reproduced with ComfyUI's own `Generate Text` node on
+> the same file — so neither is something this pack can fix:
+>
+> - **Audio does not arrive.** The caption comes back saying no clip was
+>   provided. The node logs a warning when it sees this shape of encoder rather
+>   than refusing outright, because another checkpoint may behave. Gemma-4 12B
+>   takes audio correctly.
+> - **It reasons out loud.** The prompt primes an empty thought channel and this
+>   build fills it anyway. The caption nodes cut everything up to the closing
+>   tag, so what reaches `reference_assets` is the answer alone — but if you wire
+>   `Generate Text` up yourself, that is yours to strip.
+
+Two widgets are inert on this route and say so in their tooltips: `model`, which
+is not consulted at all, and `context_size`, which is a llama.cpp KV-cache knob.
+`max_frames` still applies — the frames are thinned here, before the encoder sees
+them, rather than being left to the encoder's own 1 fps subsampling.
+
+The GGUF route is not going anywhere: it reaches models ComfyUI has no encoder
+for, and it needs nothing loaded in advance. Leave `clip` unconnected and nothing
+about either node changes.
+
 ### MiniMax-H3 Guide Prompt (any LLM)
 
 Builds the guide-based `system_prompt` and `user_prompt` and returns them as
 strings, without running anything. Costs no VRAM and no time. Wire them into
 whichever LLM node you already use — local, API, remote — when you would rather
 not run the model here. It covers all five tasks, Ref2VA included.
+
+A third output, `prompt`, is both of them in one string, because most LLM nodes
+take exactly one — **including ComfyUI's own `Generate Text`**, which since 0.30
+runs a language model in ComfyUI's own process off a model loaded by `CLIPLoader`.
+That is the shortest route to this pack's output with no GGUF downloaded at all,
+if you already keep a Qwen3-VL or Gemma-4 text encoder for an image model:
+
+![Load CLIP feeding Generate Text, with the Guide Prompt node's third output wired into its prompt input and a text viewer on the right showing the finished rewrite: subject_definitions binding Subject 1 and Picture 1, the summary with its reference-generation task type, the retention analysis, the shot-by-shot body with timecodes, the soundscape and non_diegetic_music](docs/node_guide_prompt.png)
+
+*Ref2VA through a 4B Qwen3.5 — 37.7 s, and all six sections came back. The node's
+own status line is the number worth knowing: a 25 042-character system prompt is
+**about 10 240 tokens of context** before the model writes a word, which is what
+decides whether a given encoder can take this at all.*
+
+Three settings on `Generate Text` decide whether it works:
+
+- **`max_length`** — its default of 512 is the *output* budget, and six Ref2VA
+  sections do not fit in it. Around **2048** is right, which is what this pack's
+  own writers use (`max_new_tokens` in the options node). Measured on a 4B
+  Qwen3-VL: a Ref2VA rewrite came back complete in **53 s including the model
+  load**, stopping on its own at roughly 580 tokens — inside 2048 with room to
+  spare, and past 512 by enough that the default would have cut it mid-section.
+- **`thinking`** — off. The guide asks for fields and nothing else; reasoning
+  spends the budget above on prose you then have to strip.
+- **`use_default_template`** — leave it on, and leave `format` on `plain`.
+
+`format` is the one knob worth knowing about. On `plain` the two prompts are
+joined with a blank line and the LLM node wraps the result in the model's own
+chat template, which puts the whole guide inside the *user* turn. On `chatml` the
+turns are written out here instead: a Qwen text encoder skips its own template as
+soon as the text starts with `<|im_start|>`, so the guide arrives as a real
+system message. That branch also skips Qwen's thinking suppression, so the empty
+`<think>` block is written for you. It is Qwen-shaped by construction — on Gemma
+or anything else, stay on `plain`.
 
 ### The guides are fetched, not bundled
 

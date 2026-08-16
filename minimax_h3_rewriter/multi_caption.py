@@ -35,7 +35,7 @@ from dataclasses import dataclass
 
 from comfy_api.latest import io
 
-from . import discovery, media, mtmd_engine
+from . import clip_caption, discovery, media, mtmd_engine
 from .nodes import (
     BYPASS_CAPTION_TOOLTIP,
     CAPTION_INSTRUCTIONS,
@@ -234,6 +234,18 @@ class MiniMaxH3MultiReferenceCaption(io.ComfyNode):
                     force_input=True,
                     tooltip="reference_assets from an earlier caption node, if this one is in a chain.",
                 ),
+                io.Clip.Input(
+                    "clip",
+                    optional=True,
+                    tooltip=(
+                        "A multimodal text encoder loaded by 'CLIPLoader' -- Qwen3-VL or "
+                        "Gemma-4. Connect it and every asset here is described by that model "
+                        "instead of by 'model': it stays loaded between assets and between "
+                        "runs, so a shot full of references costs one load rather than one per "
+                        "asset. Only Gemma-4 E2B, E4B and 12B can hear audio. Leave it "
+                        "unconnected and nothing changes."
+                    ),
+                ),
                 io.Custom(OPTIONS_TYPE).Input("options", optional=True),
                 io.String.Input(
                     "enabled_mask",
@@ -248,7 +260,8 @@ class MiniMaxH3MultiReferenceCaption(io.ComfyNode):
                         "A multimodal GGUF and its projector. Entries prefixed 'on disk:' are "
                         "pairs already in your ComfyUI model folders. One model reads every asset "
                         "here, so it has to cover every kind you connected -- a vision-only "
-                        "captioner cannot take the audio group."
+                        "captioner cannot take the audio group. Ignored entirely while 'clip' is "
+                        "connected."
                     ),
                 ),
                 io.Combo.Input(
@@ -314,6 +327,7 @@ class MiniMaxH3MultiReferenceCaption(io.ComfyNode):
         videos=None,
         audios=None,
         previous="",
+        clip=None,
         options=None,
         enabled_mask="{}",
         max_frames=media.DEFAULT_MAX_FRAMES,
@@ -349,15 +363,20 @@ class MiniMaxH3MultiReferenceCaption(io.ComfyNode):
         if options:
             settings.update(options)
 
-        choice = _resolve_captioner_choice(model)
-        if choice.local:
-            model_path, mmproj_path = choice.reference, choice.mmproj
+        kinds = {asset.kind for asset in assets}
+        model_path = mmproj_path = None
+        if clip is None:
+            choice = _resolve_captioner_choice(model)
+            if choice.local:
+                model_path, mmproj_path = choice.reference, choice.mmproj
+            else:
+                model_path, mmproj_path = _ensure_pair(
+                    choice.reference, choice.file, choice.mmproj, "Captioner",
+                    settings["auto_download"], progress,
+                )
+            _check_encoders(mmproj_path, kinds)
         else:
-            model_path, mmproj_path = _ensure_pair(
-                choice.reference, choice.file, choice.mmproj, "Captioner",
-                settings["auto_download"], progress,
-            )
-        _check_encoders(mmproj_path, {asset.kind for asset in assets})
+            clip_caption.check(clip, kinds)
 
         progress.set_total(len(assets))
         captions = []
@@ -370,27 +389,44 @@ class MiniMaxH3MultiReferenceCaption(io.ComfyNode):
             )
 
             asked = f"{CAPTION_INSTRUCTIONS[asset.role]} {CAPTION_LENGTHS[length]}"
-            caption = mtmd_engine.describe(
-                model_path=model_path,
-                mmproj_path=mmproj_path,
-                instruction=asked,
-                image=asset.value if asset.kind == "image" or frames else None,
-                audio=asset.value if asset.kind == "audio" else None,
-                video=None if frames else (asset.value if asset.kind == "video" else None),
-                max_frames=int(max_frames),
-                gpu_layers=int(settings["gpu_layers"]),
-                n_ctx=int(context_size),
-                seed=int(seed),
-                greedy=True,
-                max_new_tokens=min(int(settings["max_new_tokens"]), 1024),
-                temperature=float(settings["temperature"]),
-                top_p=float(settings["top_p"]),
-                top_k=int(settings["top_k"]),
-                device=settings["device"],
-                backend=settings["llama_backend"],
-                auto_download=settings["auto_download"],
-                progress=progress,
-            )
+            as_image = asset.value if asset.kind == "image" or frames else None
+            as_audio = asset.value if asset.kind == "audio" else None
+            as_video = None if frames else (asset.value if asset.kind == "video" else None)
+
+            if clip is not None:
+                caption = clip_caption.describe(
+                    clip,
+                    instruction=asked,
+                    image=as_image,
+                    audio=as_audio,
+                    video=as_video,
+                    max_frames=int(max_frames),
+                    seed=int(seed),
+                    settings=settings,
+                    progress=progress,
+                )
+            else:
+                caption = mtmd_engine.describe(
+                    model_path=model_path,
+                    mmproj_path=mmproj_path,
+                    instruction=asked,
+                    image=as_image,
+                    audio=as_audio,
+                    video=as_video,
+                    max_frames=int(max_frames),
+                    gpu_layers=int(settings["gpu_layers"]),
+                    n_ctx=int(context_size),
+                    seed=int(seed),
+                    greedy=True,
+                    max_new_tokens=min(int(settings["max_new_tokens"]), 1024),
+                    temperature=float(settings["temperature"]),
+                    top_p=float(settings["top_p"]),
+                    top_k=int(settings["top_k"]),
+                    device=settings["device"],
+                    backend=settings["llama_backend"],
+                    auto_download=settings["auto_download"],
+                    progress=progress,
+                )
 
             caption = " ".join(caption.split())
             captions.append(caption)
