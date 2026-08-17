@@ -6,6 +6,50 @@ The version in `pyproject.toml`, the git tag and the release on GitHub always sa
 the same thing; the release workflow refuses a tag that disagrees with
 `pyproject.toml`, or one that neither changelog has a section for.
 
+## 0.12.1 - 2026-08-17
+
+### Fixed
+
+- **The LoRA was silently not applied on llama-cpp-python builds that have moved
+  to the newer adapter API.** The backend passed the adapter as
+  `Llama(lora_path=...)`, which is how upstream has always spelled it. Builds
+  that replaced it with a registry - `load_lora(name, path)` at load time, then
+  `active_loras=[{"name": ..., "scale": ...}]` per call - no longer have that
+  parameter, and `Llama.__init__` takes a `**kwargs` it never reads, so the
+  argument was accepted and thrown away rather than rejected. Nothing raised,
+  the log still announced the adapter, and the node answered from the plain base
+  model: `use_lora` on and off produced byte-identical text, with cut points in
+  the base model's `00:00-00:05` ranges instead of the trained `00:08.500`.
+
+  Which API a build offers is now decided by reading the signature, because the
+  way this fails is silence and there is no exception to catch. The `TypeError`
+  guard it replaces could never have fired - the `**kwargs` is in every build,
+  upstream's included, and there it simply did not matter. A build with neither
+  API now refuses and points at `gguf_runtime: llama.cpp`, whose `--lora` was
+  never affected, instead of quietly running an unadapted model.
+
+  Registration is read back with `list_loras()` rather than assumed.
+  `Llama.eval` looks adapters up by name and skips a miss with a warning it
+  prints only when `verbose`, which this backend turns off, so an unchecked
+  `load_lora` would have rebuilt exactly the same silence one layer down. A
+  successful registration now writes one `INFO` line naming the adapter and the
+  count of loaded ones.
+
+  Reported, diagnosed down to the line and verified by
+  [@ioritree](https://github.com/ioritree) in
+  [#2](https://github.com/pytraveler/MiniMax-H3-Prompt-Rewriter-ComfyUI/issues/2),
+  against JamePeng's CUDA fork at 0.3.47.
+
+- **Access violation on unload, once the adapter really is attached.** That same
+  registry is walked by `LlamaModel.close` *after* it has freed the base model,
+  so `llama_adapter_lora_free` runs against memory that is already gone and the
+  ComfyUI worker thread dies with `access violation reading 0x...` on every
+  unload. The adapters are now released while the model they point into is still
+  alive, which hands `close` an empty registry and the bad branch is never
+  entered. Nothing is freed twice - the adapter's own `free` guards on its
+  pointer - and builds without the newer API do not have the method at all, so
+  they are untouched.
+
 ## 0.12.0 - 2026-08-16
 
 ### Added

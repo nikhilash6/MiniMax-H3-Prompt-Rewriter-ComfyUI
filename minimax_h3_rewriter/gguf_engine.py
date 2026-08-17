@@ -8,11 +8,25 @@ absent it, this backend is simply unavailable and the node says so.
 The prompt is rendered from the GGUF's own chat template rather than through
 llama-cpp-python's chat formatter, because the reference implementation passes
 ``enable_thinking=False`` and the formatter has no way to forward it.
+
+Attaching the adapter takes two different shapes depending on the build, and the
+difference has to be settled by looking rather than by trying. The long-standing
+spelling is ``Llama(lora_path=...)``, applied during construction. Some builds --
+JamePeng's CUDA fork from 0.3.47 onwards, for one -- have replaced it with a
+registry: ``load_lora(name, path)`` after construction, then
+``active_loras=[{"name": ..., "scale": ...}]`` on the call that generates. What
+makes this dangerous rather than merely different is that ``Llama.__init__``
+takes a ``**kwargs`` it never reads, in every build including upstream's, so an
+argument it does not know is accepted and discarded. A ``lora_path`` handed to a
+build that dropped it raises nothing at all: the node loads, logs the adapter,
+and answers from the plain base model. Hence :func:`_lora_api`, which asks the
+signature, and :func:`_register_adapter`, which reads the registry back.
 """
 
 from __future__ import annotations
 
 import gc
+import inspect
 import logging
 import os
 import sys
@@ -24,8 +38,11 @@ from .progress import NodeProgress
 
 log = logging.getLogger(__name__)
 
-_STATE: dict = {"key": None, "llama": None}
+_STATE: dict = {"key": None, "llama": None, "lora": None}
 _LOCK = threading.RLock()
+
+LORA_MODERN = "modern"
+LORA_LEGACY = "legacy"
 
 PREVIEW_TAIL = 280
 RELEASES_URL = "https://github.com/abetlen/llama-cpp-python/releases"
@@ -108,6 +125,85 @@ def _interrupted() -> bool:
         return False
 
 
+def _lora_api(llama_cpp) -> str:
+    """Which adapter API this build offers: modern, legacy, or none at all.
+
+    Asked of the signature rather than of a ``try``/``except``, because the way
+    this fails is silence: the constructor swallows what it does not recognise.
+    """
+    llama = getattr(llama_cpp, "Llama", None)
+    if llama is None:
+        return ""
+    if callable(getattr(llama, "load_lora", None)):
+        return LORA_MODERN
+    try:
+        parameters = inspect.signature(llama.__init__).parameters
+    except (TypeError, ValueError):
+        return LORA_LEGACY
+    return LORA_LEGACY if "lora_path" in parameters else ""
+
+
+def _register_adapter(llama, adapter_path: str) -> str:
+    """Load the adapter into a modern build, and confirm it really landed.
+
+    ``Llama.eval`` looks each adapter up by name and skips a miss with a warning
+    it prints only when ``verbose`` -- which this backend turns off, since
+    llama.cpp's loader output is not what a ComfyUI console is for. Reading the
+    registry back is what stands in for that warning: without it a refused file
+    would leave the base model answering under the rewriter's name, which is the
+    whole failure this branch exists to prevent.
+    """
+    name = os.path.splitext(os.path.basename(adapter_path))[0] or "adapter"
+    llama.load_lora(name, adapter_path)
+
+    lookup = getattr(llama, "list_loras", None)
+    registered = list(lookup()) if callable(lookup) else [name]
+    if name not in registered:
+        raise RuntimeError(
+            f"llama-cpp-python took the adapter '{adapter_path}' but did not register it "
+            f"as '{name}' (registry: {registered or 'empty'}). Refusing to generate, "
+            "because the model would answer as though it had never been fine-tuned."
+        )
+
+    log.info(
+        "[minimax_h3_rewriter.gguf.load] adapter registered as %r (%d loaded)",
+        name,
+        len(registered),
+    )
+    return name
+
+
+def _active_loras(llama):
+    """The ``active_loras`` argument for this instance, or ``None``.
+
+    Only the modern API needs it -- the legacy one applied the adapter while the
+    model was being built. The identity check keeps a stale name from a previous
+    load off an instance that was created without one.
+    """
+    with _LOCK:
+        name = _STATE.get("lora") if _STATE.get("llama") is llama else None
+    return [{"name": name, "scale": 1.0}] if name else None
+
+
+def _release_adapters(llama) -> None:
+    """Free the adapters while the model they point into is still alive.
+
+    ``LlamaModel.close`` frees the base model first and walks its adapter
+    registry afterwards, so ``llama_adapter_lora_free`` runs against memory that
+    is already gone -- an access violation that takes ComfyUI's worker thread
+    with it, on every unload. Doing it here hands ``close`` an empty registry.
+    Nothing is freed twice: the adapter's own ``free`` guards on its pointer, so
+    the later passes are no-ops.
+    """
+    release = getattr(llama, "unload_all_loras", None)
+    if not callable(release):
+        return
+    try:
+        release()
+    except Exception:
+        log.debug("[minimax_h3_rewriter.gguf.unload] adapter release failed", exc_info=True)
+
+
 def load(
     model_path: str,
     adapter_path: str | None,
@@ -155,22 +251,30 @@ def load(
             "verbose": False,
         }
         kwargs.update(devices.llama_cpp_kwargs(device))
-        if adapter_path:
+
+        api = _lora_api(llama_cpp) if adapter_path else ""
+        if adapter_path and not api:
+            raise RuntimeError(
+                "This llama-cpp-python build offers no way to attach a LoRA: 'lora_path' "
+                "is gone from Llama() and there is no load_lora() to put it back. Set "
+                "gguf_runtime to 'llama.cpp' to run the official binaries, which pass "
+                "--lora and were never affected, or turn 'use_lora' off to run the base "
+                "model on its own."
+            )
+        if api == LORA_LEGACY:
+            # Applied during construction, and this spelling reports its own
+            # failures: the constructor raises when the adapter will not load.
             kwargs["lora_path"] = adapter_path
 
-        try:
-            llama = llama_cpp.Llama(**kwargs)
-        except TypeError as error:
-            # Older builds spell the adapter argument differently; retry without
-            # it rather than silently dropping the rewriter.
-            if adapter_path:
-                raise RuntimeError(
-                    f"This llama-cpp-python build did not accept 'lora_path' ({error}). "
-                    "Upgrade it, or run the transformers backend instead."
-                ) from error
-            raise
-
-        _STATE.update(key=key, llama=llama)
+        llama = llama_cpp.Llama(**kwargs)
+        _STATE.update(key=key, llama=llama, lora=None)
+        if api == LORA_MODERN:
+            try:
+                _STATE["lora"] = _register_adapter(llama, adapter_path)
+            except Exception:
+                # The weights are already in VRAM; refusing must not strand them.
+                unload()
+                raise
         if progress is not None:
             progress.ratio(1.0, "Model ready")
         return llama
@@ -179,8 +283,9 @@ def load(
 def unload() -> None:
     with _LOCK:
         llama = _STATE.get("llama")
-        _STATE.update(key=None, llama=None)
+        _STATE.update(key=None, llama=None, lora=None)
     if llama is not None:
+        _release_adapters(llama)
         close = getattr(llama, "close", None)
         if callable(close):
             try:
@@ -220,6 +325,9 @@ def generate(
         "stream": True,
         "seed": normalize_seed(seed),
     }
+    active = _active_loras(llama)
+    if active is not None:
+        call_kwargs["active_loras"] = active
     if greedy:
         call_kwargs["temperature"] = 0.0
     else:
@@ -236,6 +344,9 @@ def generate(
     try:
         stream = llama(rendered, **call_kwargs)
     except TypeError:
+        # Old builds have no 'seed'. Retry without it, and only it -- dropping
+        # 'active_loras' would run the base model as though the adapter were
+        # attached, which is exactly the silence this backend guards against.
         call_kwargs.pop("seed", None)
         stream = llama(rendered, **call_kwargs)
 
